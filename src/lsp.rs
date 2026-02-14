@@ -1,289 +1,278 @@
 use crate::completion;
 use crate::goto;
 use crate::hover;
+use crate::import_resolver::ImportResolver;
 use crate::links;
+use crate::lint::LintEngine;
+use crate::parser::{self, TsParser};
 use crate::references;
 use crate::rename;
-use crate::runner::{ForgeRunner, Runner};
+use crate::solar_checker;
+use crate::symbol_table::SymbolTable;
 use crate::symbols;
 use crate::utils;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tower_lsp::{Client, LanguageServer, lsp_types::*};
 
-pub struct ForgeLsp {
-    client: Client,
-    compiler: Arc<dyn Runner>,
-    ast_cache: Arc<RwLock<HashMap<String, Arc<goto::CachedBuild>>>>,
-    /// Text cache for opened documents
-    ///
-    /// The key is the file's URI converted to string, and the value is a tuple of (version, content).
-    text_cache: Arc<RwLock<HashMap<String, (i32, String)>>>,
-    completion_cache: Arc<RwLock<HashMap<String, Arc<completion::CompletionCache>>>>,
-    fast_completions: bool,
+// ---------------------------------------------------------------------------
+// Worker message types
+// ---------------------------------------------------------------------------
+
+struct TsWorkerMsg {
+    uri: Url,
+    file_path: PathBuf,
+    text: Arc<str>, // (Fix #14) shared ownership, no clone
+    version: i32,
 }
 
-impl ForgeLsp {
-    pub fn new(client: Client, use_solar: bool, fast_completions: bool) -> Self {
-        let compiler: Arc<dyn Runner> = if use_solar {
-            Arc::new(crate::solar_runner::SolarRunner)
-        } else {
-            Arc::new(ForgeRunner)
+struct SolarWorkerMsg {
+    uri: Url,
+    file_path: PathBuf,
+    /// Monotonic counter to detect stale results. (Fix #2)
+    seq: u64,
+}
+
+// ---------------------------------------------------------------------------
+// Workers
+// ---------------------------------------------------------------------------
+
+/// Long-lived tree-sitter worker. Parses once, then lints + indexes from
+/// the same tree. (Fix #1)
+async fn ts_worker(
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<TsWorkerMsg>,
+    client: Client,
+    ts_parser: Arc<tokio::sync::Mutex<TsParser>>,
+    lint_engine: Arc<LintEngine>,
+    symbol_table: Arc<RwLock<SymbolTable>>,
+    ts_diag_cache: Arc<RwLock<HashMap<String, Vec<Diagnostic>>>>,
+) {
+    while let Some(mut msg) = rx.recv().await {
+        // Drain queued messages — only process the latest.
+        while let Ok(newer) = rx.try_recv() {
+            msg = newer;
+        }
+
+        // Parse once. (Fix #1)
+        let tree = {
+            let mut parser = ts_parser.lock().await;
+            match parser.parse(&msg.text, None) {
+                Some(t) => t,
+                None => continue,
+            }
         };
-        let ast_cache = Arc::new(RwLock::new(HashMap::new()));
+
+        // Lint from the parsed tree.
+        let mut diags = parser::collect_parse_errors(&tree, &msg.text);
+        diags.extend(lint_engine.run(&tree, &msg.text));
+
+        // Cache tree-sitter diagnostics (moved, not cloned). (Fix #13)
+        {
+            let mut cache = ts_diag_cache.write().await;
+            cache.insert(msg.uri.to_string(), diags.clone());
+        }
+        client
+            .publish_diagnostics(msg.uri.clone(), diags, Some(msg.version))
+            .await;
+
+        // Re-index symbol table using the same tree. (Fix #1)
+        {
+            let mut parser = ts_parser.lock().await;
+            let mut st = symbol_table.write().await;
+            st.index_file_with_tree(&msg.file_path, &msg.text, &tree);
+            st.resolve_file_references(&msg.file_path, &mut parser);
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+/// Long-lived solar worker with sequence-based staleness check. (Fix #2)
+async fn solar_worker(
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<SolarWorkerMsg>,
+    client: Client,
+    ts_diag_cache: Arc<RwLock<HashMap<String, Vec<Diagnostic>>>>,
+    latest_seq: Arc<std::sync::atomic::AtomicU64>,
+) {
+    while let Some(mut msg) = rx.recv().await {
+        // Drain queued messages — only process the latest.
+        while let Ok(newer) = rx.try_recv() {
+            msg = newer;
+        }
+
+        let my_seq = msg.seq;
+
+        // Run solar on a blocking thread.
+        let file_path = msg.file_path.clone();
+        let solar_diags =
+            tokio::task::spawn_blocking(move || solar_checker::check_file(&file_path))
+                .await
+                .unwrap_or_default();
+
+        // Check if a newer ts_worker result has arrived since we started.
+        // If so, our ts_diag_cache may be stale — skip merging. (Fix #2)
+        let current_seq = latest_seq.load(std::sync::atomic::Ordering::Acquire);
+        if my_seq < current_seq {
+            // Stale — a newer version was processed by ts_worker. Skip.
+            continue;
+        }
+
+        // Merge with cached tree-sitter diagnostics.
+        let uri_str = msg.uri.to_string();
+        let ts_diags = ts_diag_cache
+            .read()
+            .await
+            .get(&uri_str)
+            .cloned()
+            .unwrap_or_default();
+        let mut merged = ts_diags;
+        merged.extend(solar_diags);
+
+        client.publish_diagnostics(msg.uri, merged, None).await;
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LSP server
+// ---------------------------------------------------------------------------
+
+pub struct SolLsp {
+    client: Client,
+    symbol_table: Arc<RwLock<SymbolTable>>,
+    /// In-memory text buffers using Arc<str> for zero-copy sharing. (Fix #14)
+    text_cache: Arc<RwLock<HashMap<String, Arc<str>>>>,
+    ts_parser: Arc<tokio::sync::Mutex<TsParser>>,
+    lint_engine: Arc<LintEngine>,
+    ts_tx: tokio::sync::mpsc::UnboundedSender<TsWorkerMsg>,
+    solar_tx: tokio::sync::mpsc::UnboundedSender<SolarWorkerMsg>,
+    ts_rx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<TsWorkerMsg>>>>,
+    solar_rx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<SolarWorkerMsg>>>>,
+    ts_diag_cache: Arc<RwLock<HashMap<String, Vec<Diagnostic>>>>,
+    /// Monotonic sequence number for staleness detection. (Fix #2)
+    seq: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl SolLsp {
+    pub fn new(client: Client) -> Self {
+        // Use "." as placeholder; will be updated in initialize(). (Fix #25)
+        let resolver = ImportResolver::new(std::path::Path::new("."));
+        let symbol_table = Arc::new(RwLock::new(SymbolTable::new(resolver)));
         let text_cache = Arc::new(RwLock::new(HashMap::new()));
-        let completion_cache = Arc::new(RwLock::new(HashMap::new()));
+        let ts_parser = Arc::new(tokio::sync::Mutex::new(TsParser::new()));
+        let lint_engine = Arc::new(LintEngine::new());
+        let ts_diag_cache = Arc::new(RwLock::new(HashMap::new()));
+
+        let (ts_tx, ts_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (solar_tx, solar_rx) = tokio::sync::mpsc::unbounded_channel();
+
         Self {
             client,
-            compiler,
-            ast_cache,
+            symbol_table,
             text_cache,
-            completion_cache,
-            fast_completions,
+            ts_parser,
+            lint_engine,
+            ts_tx,
+            solar_tx,
+            ts_rx: Arc::new(tokio::sync::Mutex::new(Some(ts_rx))),
+            solar_rx: Arc::new(tokio::sync::Mutex::new(Some(solar_rx))),
+            ts_diag_cache,
+            seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
-    async fn on_change(&self, params: TextDocumentItem) {
-        let uri = params.uri.clone();
-        let version = params.version;
-
-        let file_path = match uri.to_file_path() {
-            Ok(path) => path,
-            Err(_) => {
-                self.client
-                    .log_message(MessageType::ERROR, "Invalid file URI")
-                    .await;
-                return;
-            }
-        };
-
-        let path_str = match file_path.to_str() {
-            Some(s) => s,
-            None => {
-                self.client
-                    .log_message(MessageType::ERROR, "Invalid file path")
-                    .await;
-                return;
-            }
-        };
-
-        let (lint_result, build_result, ast_result) = tokio::join!(
-            self.compiler.get_lint_diagnostics(&uri),
-            self.compiler.get_build_diagnostics(&uri),
-            self.compiler.ast(path_str)
-        );
-
-        // Only replace cache with new AST if build succeeded (no errors; warnings are OK)
-        let build_succeeded = matches!(&build_result, Ok(diagnostics) if diagnostics.iter().all(|d| d.severity != Some(DiagnosticSeverity::ERROR)));
-
-        if build_succeeded {
-            if let Ok(ast_data) = ast_result {
-                let cached_build = Arc::new(goto::CachedBuild::new(ast_data));
-                let mut cache = self.ast_cache.write().await;
-                cache.insert(uri.to_string(), cached_build.clone());
-                drop(cache);
-
-                // Rebuild completion cache in the background; old cache stays usable until replaced
-                let completion_cache = self.completion_cache.clone();
-                let uri_string = uri.to_string();
-                tokio::spawn(async move {
-                    if let Some(sources) = cached_build.ast.get("sources") {
-                        let contracts = cached_build.ast.get("contracts");
-                        let cc = completion::build_completion_cache(sources, contracts);
-                        completion_cache
-                            .write()
-                            .await
-                            .insert(uri_string, Arc::new(cc));
-                    }
-                });
-                self.client
-                    .log_message(MessageType::INFO, "Build successful, AST cache updated")
-                    .await;
-            } else if let Err(e) = ast_result {
-                self.client
-                    .log_message(
-                        MessageType::INFO,
-                        format!("Build succeeded but failed to get AST: {e}"),
-                    )
-                    .await;
-            }
+    async fn get_source_and_path(&self, uri: &Url) -> Option<(PathBuf, String)> {
+        let file_path = uri.to_file_path().ok()?;
+        let text_cache = self.text_cache.read().await;
+        let source = if let Some(cached) = text_cache.get(uri.as_str()) {
+            cached.to_string()
         } else {
-            // Build has errors - keep the existing cache (don't invalidate)
-            self.client
-                .log_message(
-                    MessageType::INFO,
-                    "Build errors detected, keeping existing AST cache",
-                )
-                .await;
-        }
-
-        // cache text
-        {
-            let mut text_cache = self.text_cache.write().await;
-            text_cache.insert(uri.to_string(), (version, params.text));
-        }
-
-        let mut all_diagnostics = vec![];
-
-        match lint_result {
-            Ok(mut lints) => {
-                self.client
-                    .log_message(
-                        MessageType::INFO,
-                        format!("found {} lint diagnostics", lints.len()),
-                    )
-                    .await;
-                all_diagnostics.append(&mut lints);
-            }
-            Err(e) => {
-                self.client
-                    .log_message(
-                        MessageType::ERROR,
-                        format!("Forge lint diagnostics failed: {e}"),
-                    )
-                    .await;
-            }
-        }
-
-        match build_result {
-            Ok(mut builds) => {
-                self.client
-                    .log_message(
-                        MessageType::INFO,
-                        format!("found {} build diagnostics", builds.len()),
-                    )
-                    .await;
-                all_diagnostics.append(&mut builds);
-            }
-            Err(e) => {
-                self.client
-                    .log_message(
-                        MessageType::WARNING,
-                        format!("Forge build diagnostics failed: {e}"),
-                    )
-                    .await;
-            }
-        }
-
-        // publish diags with no version, so we are sure they get displayed
-        self.client
-            .publish_diagnostics(uri, all_diagnostics, None)
-            .await;
+            std::fs::read_to_string(&file_path).ok()?
+        };
+        Some((file_path, source))
     }
 
-    /// Get a CachedBuild from the cache, or fetch and build one on demand.
-    /// If `insert_on_miss` is true, the freshly-built entry is inserted into the cache
-    /// (used by references handler so cross-file lookups can find it later).
-    ///
-    /// When the entry is in the cache but marked stale (text_cache changed
-    /// since the last build), the text_cache content is flushed to disk and
-    /// the AST is rebuilt so that rename / references work correctly on
-    /// unsaved buffers.
-    async fn get_or_fetch_build(
-        &self,
-        uri: &Url,
-        file_path: &std::path::Path,
-        insert_on_miss: bool,
-    ) -> Option<Arc<goto::CachedBuild>> {
-        let uri_str = uri.to_string();
-
-        // Return cached entry if it exists (stale or not — stale entries are
-        // still usable, positions may be slightly off like goto-definition).
-        {
-            let cache = self.ast_cache.read().await;
-            if let Some(cached) = cache.get(&uri_str) {
-                return Some(cached.clone());
-            }
-        }
-
-        // Cache miss — build the AST from disk.
-        let path_str = file_path.to_str()?;
-        match self.compiler.ast(path_str).await {
-            Ok(data) => {
-                let build = Arc::new(goto::CachedBuild::new(data));
-                if insert_on_miss {
-                    let mut cache = self.ast_cache.write().await;
-                    cache.insert(uri_str.clone(), build.clone());
-                }
-                Some(build)
-            }
-            Err(e) => {
-                self.client
-                    .log_message(MessageType::ERROR, format!("failed to get AST: {e}"))
-                    .await;
-                None
-            }
-        }
-    }
-
-    /// Get the source bytes for a file, preferring the in-memory text cache
-    /// (which reflects unsaved editor changes) over reading from disk.
-    async fn get_source_bytes(&self, uri: &Url, file_path: &std::path::Path) -> Option<Vec<u8>> {
-        {
-            let text_cache = self.text_cache.read().await;
-            if let Some((_, content)) = text_cache.get(&uri.to_string()) {
-                return Some(content.as_bytes().to_vec());
-            }
-        }
-        match std::fs::read(file_path) {
-            Ok(bytes) => Some(bytes),
-            Err(e) => {
-                self.client
-                    .log_message(MessageType::ERROR, format!("failed to read file: {e}"))
-                    .await;
-                None
-            }
-        }
+    /// Send a file to both workers for processing. (Fix #24: text is Arc<str>)
+    fn notify_workers(&self, uri: &Url, file_path: &PathBuf, text: &Arc<str>, version: i32) {
+        let seq = self.seq.fetch_add(1, std::sync::atomic::Ordering::Release) + 1;
+        let _ = self.ts_tx.send(TsWorkerMsg {
+            uri: uri.clone(),
+            file_path: file_path.clone(),
+            text: Arc::clone(text), // no copy, just refcount bump
+            version,
+        });
+        let _ = self.solar_tx.send(SolarWorkerMsg {
+            uri: uri.clone(),
+            file_path: file_path.clone(),
+            seq,
+        });
     }
 }
 
 #[tower_lsp::async_trait]
-impl LanguageServer for ForgeLsp {
+impl LanguageServer for SolLsp {
     async fn initialize(
         &self,
         params: InitializeParams,
     ) -> tower_lsp::jsonrpc::Result<InitializeResult> {
-        // Negotiate position encoding with the client (once, for the session).
-        let client_encodings = params
-            .capabilities
-            .general
-            .as_ref()
-            .and_then(|g| g.position_encodings.as_deref());
-        let encoding = utils::PositionEncoding::negotiate(client_encodings);
+        let encoding = utils::PositionEncoding::negotiate(
+            params
+                .capabilities
+                .general
+                .as_ref()
+                .and_then(|g| g.position_encodings.as_deref()),
+        );
         utils::set_encoding(encoding);
+
+        // Update the import resolver with the actual workspace root. (Fix #25)
+        if let Some(root_uri) = params.root_uri.as_ref() {
+            if let Ok(root_path) = root_uri.to_file_path() {
+                let resolver = ImportResolver::new(&root_path);
+                let mut st = self.symbol_table.write().await;
+                st.resolver = resolver;
+            }
+        } else if let Some(folders) = params.workspace_folders.as_ref() {
+            if let Some(folder) = folders.first() {
+                if let Ok(root_path) = folder.uri.to_file_path() {
+                    let resolver = ImportResolver::new(&root_path);
+                    let mut st = self.symbol_table.write().await;
+                    st.resolver = resolver;
+                }
+            }
+        }
 
         Ok(InitializeResult {
             server_info: Some(ServerInfo {
-                name: "Solidity Language Server".to_string(),
-                version: Some(env!("LONG_VERSION").to_string()),
+                name: "solidity-language-server".to_string(),
+                version: Some(env!("CARGO_PKG_VERSION").to_string()),
             }),
             capabilities: ServerCapabilities {
                 position_encoding: Some(encoding.to_encoding_kind()),
-                completion_provider: Some(CompletionOptions {
-                    trigger_characters: Some(vec![".".to_string()]),
-                    resolve_provider: Some(false),
-                    ..Default::default()
-                }),
                 definition_provider: Some(OneOf::Left(true)),
                 declaration_provider: Some(DeclarationCapability::Simple(true)),
                 references_provider: Some(OneOf::Left(true)),
                 rename_provider: Some(OneOf::Right(RenameOptions {
                     prepare_provider: Some(true),
                     work_done_progress_options: WorkDoneProgressOptions {
-                        work_done_progress: Some(true),
+                        work_done_progress: Some(false),
                     },
                 })),
+                hover_provider: Some(HoverProviderCapability::Simple(true)),
+                completion_provider: Some(CompletionOptions {
+                    trigger_characters: Some(vec![".".to_string()]),
+                    ..Default::default()
+                }),
                 workspace_symbol_provider: Some(OneOf::Left(true)),
                 document_symbol_provider: Some(OneOf::Left(true)),
-                hover_provider: Some(HoverProviderCapability::Simple(true)),
                 document_link_provider: Some(DocumentLinkOptions {
                     resolve_provider: Some(false),
                     work_done_progress_options: WorkDoneProgressOptions {
-                        work_done_progress: None,
+                        work_done_progress: Some(false),
                     },
                 }),
-                document_formatting_provider: Some(OneOf::Left(true)),
                 text_document_sync: Some(TextDocumentSyncCapability::Options(
                     TextDocumentSyncOptions {
                         will_save: Some(true),
@@ -301,327 +290,123 @@ impl LanguageServer for ForgeLsp {
     }
 
     async fn initialized(&self, _: InitializedParams) {
+        if let Some(ts_rx) = self.ts_rx.lock().await.take() {
+            tokio::spawn(ts_worker(
+                ts_rx,
+                self.client.clone(),
+                self.ts_parser.clone(),
+                self.lint_engine.clone(),
+                self.symbol_table.clone(),
+                self.ts_diag_cache.clone(),
+            ));
+        }
+        if let Some(solar_rx) = self.solar_rx.lock().await.take() {
+            tokio::spawn(solar_worker(
+                solar_rx,
+                self.client.clone(),
+                self.ts_diag_cache.clone(),
+                self.seq.clone(),
+            ));
+        }
+
         self.client
-            .log_message(MessageType::INFO, "lsp server initialized.")
+            .log_message(MessageType::INFO, "solidity-language-server initialized")
             .await;
     }
 
     async fn shutdown(&self) -> tower_lsp::jsonrpc::Result<()> {
-        self.client
-            .log_message(MessageType::INFO, "lsp server shutting down.")
-            .await;
         Ok(())
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
-        self.client
-            .log_message(MessageType::INFO, "file opened")
-            .await;
+        let uri = params.text_document.uri;
+        let text: Arc<str> = params.text_document.text.into();
+        let version = params.text_document.version;
 
-        self.on_change(params.text_document).await
+        if let Ok(file_path) = uri.to_file_path() {
+            self.text_cache
+                .write()
+                .await
+                .insert(uri.to_string(), Arc::clone(&text));
+            self.notify_workers(&uri, &file_path, &text, version);
+        }
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
-        self.client
-            .log_message(MessageType::INFO, "file changed")
-            .await;
+        let uri = params.text_document.uri;
+        let version = params.text_document.version;
 
-        // update text cache
         if let Some(change) = params.content_changes.into_iter().next() {
-            let mut text_cache = self.text_cache.write().await;
-            text_cache.insert(
-                params.text_document.uri.to_string(),
-                (params.text_document.version, change.text),
-            );
+            let text: Arc<str> = change.text.into();
+            self.text_cache
+                .write()
+                .await
+                .insert(uri.to_string(), Arc::clone(&text));
+            if let Ok(file_path) = uri.to_file_path() {
+                self.notify_workers(&uri, &file_path, &text, version);
+            }
         }
     }
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
-        self.client
-            .log_message(MessageType::INFO, "file saved")
-            .await;
-
-        let text_content = if let Some(text) = params.text {
-            text
-        } else {
-            // Prefer text_cache (reflects unsaved changes), fall back to disk
-            let cached = {
-                let text_cache = self.text_cache.read().await;
-                text_cache
-                    .get(params.text_document.uri.as_str())
-                    .map(|(_, content)| content.clone())
-            };
-            if let Some(content) = cached {
-                content
-            } else {
-                match std::fs::read_to_string(params.text_document.uri.path()) {
-                    Ok(content) => content,
-                    Err(e) => {
-                        self.client
-                            .log_message(
-                                MessageType::ERROR,
-                                format!("Failed to read file on save: {e}"),
-                            )
-                            .await;
-                        return;
-                    }
-                }
-            }
-        };
-
-        let version = self
-            .text_cache
-            .read()
-            .await
-            .get(params.text_document.uri.as_str())
-            .map(|(version, _)| *version)
-            .unwrap_or_default();
-
-        self.on_change(TextDocumentItem {
-            uri: params.text_document.uri,
-            text: text_content,
-            version,
-            language_id: "".to_string(),
-        })
-        .await;
-    }
-
-    async fn will_save(&self, params: WillSaveTextDocumentParams) {
-        self.client
-            .log_message(
-                MessageType::INFO,
-                format!(
-                    "file will save reason:{:?} {}",
-                    params.reason, params.text_document.uri
-                ),
-            )
-            .await;
-    }
-
-    async fn formatting(
-        &self,
-        params: DocumentFormattingParams,
-    ) -> tower_lsp::jsonrpc::Result<Option<Vec<TextEdit>>> {
-        self.client
-            .log_message(MessageType::INFO, "formatting request")
-            .await;
-
         let uri = params.text_document.uri;
-        let file_path = match uri.to_file_path() {
-            Ok(path) => path,
-            Err(_) => {
-                self.client
-                    .log_message(MessageType::ERROR, "Invalid file URI for formatting")
-                    .await;
-                return Ok(None);
-            }
-        };
-        let path_str = match file_path.to_str() {
-            Some(s) => s,
+        let text: Arc<str> = match params.text {
+            Some(t) => t.into(),
             None => {
-                self.client
-                    .log_message(MessageType::ERROR, "Invalid file path for formatting")
-                    .await;
-                return Ok(None);
-            }
-        };
-
-        // Get original content
-        let original_content = {
-            let text_cache = self.text_cache.read().await;
-            if let Some((_, content)) = text_cache.get(&uri.to_string()) {
-                content.clone()
-            } else {
-                // Fallback to reading file
-                match std::fs::read_to_string(&file_path) {
-                    Ok(content) => content,
-                    Err(_) => {
-                        self.client
-                            .log_message(MessageType::ERROR, "Failed to read file for formatting")
-                            .await;
-                        return Ok(None);
-                    }
+                // Fix #3: use to_file_path() instead of uri.path()
+                match uri.to_file_path() {
+                    Ok(path) => match std::fs::read_to_string(&path) {
+                        Ok(c) => c.into(),
+                        Err(_) => return,
+                    },
+                    Err(_) => return,
                 }
             }
         };
 
-        // Get formatted content
-        let formatted_content = match self.compiler.format(path_str).await {
-            Ok(content) => content,
-            Err(e) => {
-                self.client
-                    .log_message(MessageType::WARNING, format!("Formatting failed: {e}"))
-                    .await;
-                return Ok(None);
-            }
-        };
-
-        // If changed, return edit to replace whole document
-        if original_content != formatted_content {
-            let (end_line, end_character) =
-                utils::byte_offset_to_position(&original_content, original_content.len());
-            let edit = TextEdit {
-                range: Range {
-                    start: Position {
-                        line: 0,
-                        character: 0,
-                    },
-                    end: Position {
-                        line: end_line,
-                        character: end_character,
-                    },
-                },
-                new_text: formatted_content,
-            };
-            Ok(Some(vec![edit]))
-        } else {
-            Ok(None)
+        if let Ok(file_path) = uri.to_file_path() {
+            self.text_cache
+                .write()
+                .await
+                .insert(uri.to_string(), Arc::clone(&text));
+            self.notify_workers(&uri, &file_path, &text, 0);
         }
     }
+
+    async fn will_save(&self, _params: WillSaveTextDocumentParams) {}
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
-        let uri = params.text_document.uri.to_string();
-        self.ast_cache.write().await.remove(&uri);
-        self.text_cache.write().await.remove(&uri);
-        self.completion_cache.write().await.remove(&uri);
-        self.client
-            .log_message(MessageType::INFO, "file closed, caches cleared.")
-            .await;
-    }
-
-    async fn did_change_configuration(&self, _: DidChangeConfigurationParams) {
-        self.client
-            .log_message(MessageType::INFO, "configuration changed.")
-            .await;
-    }
-    async fn did_change_workspace_folders(&self, _: DidChangeWorkspaceFoldersParams) {
-        self.client
-            .log_message(MessageType::INFO, "workdspace folders changed.")
-            .await;
-    }
-
-    async fn did_change_watched_files(&self, _: DidChangeWatchedFilesParams) {
-        self.client
-            .log_message(MessageType::INFO, "watched files have changed.")
-            .await;
-    }
-
-    async fn completion(
-        &self,
-        params: CompletionParams,
-    ) -> tower_lsp::jsonrpc::Result<Option<CompletionResponse>> {
-        let uri = params.text_document_position.text_document.uri;
-        let position = params.text_document_position.position;
-
-        let trigger_char = params
-            .context
-            .as_ref()
-            .and_then(|ctx| ctx.trigger_character.as_deref());
-
-        // Get source text — only needed for dot completions (to parse the line)
-        let source_text = {
-            let text_cache = self.text_cache.read().await;
-            if let Some((_, text)) = text_cache.get(&uri.to_string()) {
-                text.clone()
-            } else {
-                match uri.to_file_path() {
-                    Ok(path) => std::fs::read_to_string(&path).unwrap_or_default(),
-                    Err(_) => return Ok(None),
-                }
-            }
-        };
-
-        // Clone the Arc (pointer copy, instant) and drop the lock immediately.
-        let cached: Option<Arc<completion::CompletionCache>> = {
-            let comp_cache = self.completion_cache.read().await;
-            comp_cache.get(&uri.to_string()).cloned()
-        };
-
-        if cached.is_none() {
-            // Spawn background cache build so the next request will have full completions
-            let ast_cache = self.ast_cache.clone();
-            let completion_cache = self.completion_cache.clone();
-            let uri_string = uri.to_string();
-            tokio::spawn(async move {
-                let cached_build = {
-                    let cache = ast_cache.read().await;
-                    match cache.get(&uri_string) {
-                        Some(v) => v.clone(),
-                        None => return,
-                    }
-                };
-                if let Some(sources) = cached_build.ast.get("sources") {
-                    let contracts = cached_build.ast.get("contracts");
-                    let cc = completion::build_completion_cache(sources, contracts);
-                    completion_cache
-                        .write()
-                        .await
-                        .insert(uri_string, Arc::new(cc));
-                }
-            });
+        let uri_str = params.text_document.uri.to_string();
+        self.ts_diag_cache.write().await.remove(&uri_str);
+        self.text_cache.write().await.remove(&uri_str);
+        // Fix #7: also remove from symbol table.
+        if let Ok(file_path) = params.text_document.uri.to_file_path() {
+            self.symbol_table.write().await.remove_file(&file_path);
         }
-
-        let cache_ref = cached.as_deref();
-        let result = completion::handle_completion(
-            cache_ref,
-            &source_text,
-            position,
-            trigger_char,
-            self.fast_completions,
-        );
-        Ok(result)
     }
+
+    async fn did_change_configuration(&self, _: DidChangeConfigurationParams) {}
+
+    async fn did_change_workspace_folders(&self, _: DidChangeWorkspaceFoldersParams) {}
+
+    async fn did_change_watched_files(&self, _: DidChangeWatchedFilesParams) {}
 
     async fn goto_definition(
         &self,
         params: GotoDefinitionParams,
     ) -> tower_lsp::jsonrpc::Result<Option<GotoDefinitionResponse>> {
-        self.client
-            .log_message(MessageType::INFO, "got textDocument/definition request")
-            .await;
-
-        let uri = params.text_document_position_params.text_document.uri;
+        let uri = &params.text_document_position_params.text_document.uri;
         let position = params.text_document_position_params.position;
 
-        let file_path = match uri.to_file_path() {
-            Ok(path) => path,
-            Err(_) => {
-                self.client
-                    .log_message(MessageType::ERROR, "Invalid file uri")
-                    .await;
-                return Ok(None);
-            }
-        };
-
-        let source_bytes = match self.get_source_bytes(&uri, &file_path).await {
-            Some(bytes) => bytes,
+        let (file_path, source) = match self.get_source_and_path(uri).await {
+            Some(v) => v,
             None => return Ok(None),
         };
 
-        let cached_build = self.get_or_fetch_build(&uri, &file_path, false).await;
-        let cached_build = match cached_build {
-            Some(cb) => cb,
-            None => return Ok(None),
-        };
-
-        if let Some(location) =
-            goto::goto_declaration(&cached_build.ast, &uri, position, &source_bytes)
-        {
-            self.client
-                .log_message(
-                    MessageType::INFO,
-                    format!(
-                        "found definition at {}:{}",
-                        location.uri, location.range.start.line
-                    ),
-                )
-                .await;
-            Ok(Some(GotoDefinitionResponse::from(location)))
-        } else {
-            self.client
-                .log_message(MessageType::INFO, "no definition found")
-                .await;
-            Ok(None)
+        let st = self.symbol_table.read().await;
+        match goto::goto_definition(&st, &file_path, &source, position) {
+            Some(loc) => Ok(Some(GotoDefinitionResponse::from(loc))),
+            None => Ok(None),
         }
     }
 
@@ -629,52 +414,18 @@ impl LanguageServer for ForgeLsp {
         &self,
         params: request::GotoDeclarationParams,
     ) -> tower_lsp::jsonrpc::Result<Option<request::GotoDeclarationResponse>> {
-        self.client
-            .log_message(MessageType::INFO, "got textDocument/declaration request")
-            .await;
-
-        let uri = params.text_document_position_params.text_document.uri;
+        let uri = &params.text_document_position_params.text_document.uri;
         let position = params.text_document_position_params.position;
 
-        let file_path = match uri.to_file_path() {
-            Ok(path) => path,
-            Err(_) => {
-                self.client
-                    .log_message(MessageType::ERROR, "invalid file uri")
-                    .await;
-                return Ok(None);
-            }
-        };
-
-        let source_bytes = match self.get_source_bytes(&uri, &file_path).await {
-            Some(bytes) => bytes,
+        let (file_path, source) = match self.get_source_and_path(uri).await {
+            Some(v) => v,
             None => return Ok(None),
         };
 
-        let cached_build = self.get_or_fetch_build(&uri, &file_path, false).await;
-        let cached_build = match cached_build {
-            Some(cb) => cb,
-            None => return Ok(None),
-        };
-
-        if let Some(location) =
-            goto::goto_declaration(&cached_build.ast, &uri, position, &source_bytes)
-        {
-            self.client
-                .log_message(
-                    MessageType::INFO,
-                    format!(
-                        "found declaration at {}:{}",
-                        location.uri, location.range.start.line
-                    ),
-                )
-                .await;
-            Ok(Some(request::GotoDeclarationResponse::from(location)))
-        } else {
-            self.client
-                .log_message(MessageType::INFO, "no declaration found")
-                .await;
-            Ok(None)
+        let st = self.symbol_table.read().await;
+        match goto::goto_definition(&st, &file_path, &source, position) {
+            Some(loc) => Ok(Some(request::GotoDeclarationResponse::from(loc))),
+            None => Ok(None),
         }
     }
 
@@ -682,84 +433,21 @@ impl LanguageServer for ForgeLsp {
         &self,
         params: ReferenceParams,
     ) -> tower_lsp::jsonrpc::Result<Option<Vec<Location>>> {
-        self.client
-            .log_message(MessageType::INFO, "Got a textDocument/references request")
-            .await;
-
-        let uri = params.text_document_position.text_document.uri;
+        let uri = &params.text_document_position.text_document.uri;
         let position = params.text_document_position.position;
-        let file_path = match uri.to_file_path() {
-            Ok(path) => path,
-            Err(_) => {
-                self.client
-                    .log_message(MessageType::ERROR, "Invalid file URI")
-                    .await;
-                return Ok(None);
-            }
-        };
-        let source_bytes = match self.get_source_bytes(&uri, &file_path).await {
-            Some(bytes) => bytes,
-            None => return Ok(None),
-        };
-        let cached_build = self.get_or_fetch_build(&uri, &file_path, true).await;
-        let cached_build = match cached_build {
-            Some(cb) => cb,
+        let include_declaration = params.context.include_declaration;
+
+        let (file_path, source) = match self.get_source_and_path(uri).await {
+            Some(v) => v,
             None => return Ok(None),
         };
 
-        // Get references from the current file's AST
-        let mut locations = references::goto_references(
-            &cached_build.ast,
-            &uri,
-            position,
-            &source_bytes,
-            params.context.include_declaration,
-        );
-
-        // Cross-file: resolve target definition location, then scan other cached ASTs
-        if let Some((def_abs_path, def_byte_offset)) =
-            references::resolve_target_location(&cached_build, &uri, position, &source_bytes)
-        {
-            let cache = self.ast_cache.read().await;
-            for (cached_uri, other_build) in cache.iter() {
-                if *cached_uri == uri.to_string() {
-                    continue;
-                }
-                let other_locations = references::goto_references_for_target(
-                    other_build,
-                    &def_abs_path,
-                    def_byte_offset,
-                    None,
-                    params.context.include_declaration,
-                );
-                locations.extend(other_locations);
-            }
-        }
-
-        // Deduplicate across all caches
-        let mut seen = std::collections::HashSet::new();
-        locations.retain(|loc| {
-            seen.insert((
-                loc.uri.clone(),
-                loc.range.start.line,
-                loc.range.start.character,
-                loc.range.end.line,
-                loc.range.end.character,
-            ))
-        });
-
+        let st = self.symbol_table.read().await;
+        let locations =
+            references::find_references(&st, &file_path, &source, position, include_declaration);
         if locations.is_empty() {
-            self.client
-                .log_message(MessageType::INFO, "No references found")
-                .await;
             Ok(None)
         } else {
-            self.client
-                .log_message(
-                    MessageType::INFO,
-                    format!("Found {} references", locations.len()),
-                )
-                .await;
             Ok(Some(locations))
         }
     }
@@ -768,44 +456,17 @@ impl LanguageServer for ForgeLsp {
         &self,
         params: TextDocumentPositionParams,
     ) -> tower_lsp::jsonrpc::Result<Option<PrepareRenameResponse>> {
-        self.client
-            .log_message(MessageType::INFO, "got textDocument/prepareRename request")
-            .await;
-
-        let uri = params.text_document.uri;
+        let uri = &params.text_document.uri;
         let position = params.position;
 
-        let file_path = match uri.to_file_path() {
-            Ok(path) => path,
-            Err(_) => {
-                self.client
-                    .log_message(MessageType::ERROR, "invalid file uri")
-                    .await;
-                return Ok(None);
-            }
-        };
-
-        let source_bytes = match self.get_source_bytes(&uri, &file_path).await {
-            Some(bytes) => bytes,
+        let (_file_path, source) = match self.get_source_and_path(uri).await {
+            Some(v) => v,
             None => return Ok(None),
         };
 
-        if let Some(range) = rename::get_identifier_range(&source_bytes, position) {
-            self.client
-                .log_message(
-                    MessageType::INFO,
-                    format!(
-                        "prepare rename range: {}:{}",
-                        range.start.line, range.start.character
-                    ),
-                )
-                .await;
-            Ok(Some(PrepareRenameResponse::Range(range)))
-        } else {
-            self.client
-                .log_message(MessageType::INFO, "no identifier found for prepare rename")
-                .await;
-            Ok(None)
+        match rename::get_identifier_range(&source, position) {
+            Some(range) => Ok(Some(PrepareRenameResponse::Range(range))),
+            None => Ok(None),
         }
     }
 
@@ -813,121 +474,92 @@ impl LanguageServer for ForgeLsp {
         &self,
         params: RenameParams,
     ) -> tower_lsp::jsonrpc::Result<Option<WorkspaceEdit>> {
-        self.client
-            .log_message(MessageType::INFO, "got textDocument/rename request")
-            .await;
-
-        let uri = params.text_document_position.text_document.uri;
+        let uri = &params.text_document_position.text_document.uri;
         let position = params.text_document_position.position;
-        let new_name = params.new_name;
-        let file_path = match uri.to_file_path() {
-            Ok(p) => p,
-            Err(_) => {
-                self.client
-                    .log_message(MessageType::ERROR, "invalid file uri")
-                    .await;
-                return Ok(None);
-            }
-        };
-        let source_bytes = match self.get_source_bytes(&uri, &file_path).await {
-            Some(bytes) => bytes,
+        let new_name = &params.new_name;
+
+        let (file_path, source) = match self.get_source_and_path(uri).await {
+            Some(v) => v,
             None => return Ok(None),
         };
 
-        let current_identifier = match rename::get_identifier_at_position(&source_bytes, position) {
+        let current_identifier = match rename::get_identifier_at_position(&source, position) {
             Some(id) => id,
-            None => {
-                self.client
-                    .log_message(MessageType::ERROR, "No identifier found at position")
-                    .await;
-                return Ok(None);
-            }
+            None => return Ok(None),
         };
 
-        if !utils::is_valid_solidity_identifier(&new_name) {
+        if !utils::is_valid_solidity_identifier(new_name) {
             return Err(tower_lsp::jsonrpc::Error::invalid_params(
                 "new name is not a valid solidity identifier",
             ));
         }
 
-        if new_name == current_identifier {
-            self.client
-                .log_message(
-                    MessageType::INFO,
-                    "new name is the same as current identifier",
-                )
-                .await;
+        if *new_name == current_identifier {
             return Ok(None);
         }
 
-        let cached_build = self.get_or_fetch_build(&uri, &file_path, false).await;
-        let cached_build = match cached_build {
-            Some(cb) => cb,
+        let st = self.symbol_table.read().await;
+        Ok(rename::rename_symbol(
+            &st, &file_path, &source, position, new_name,
+        ))
+    }
+
+    async fn hover(&self, params: HoverParams) -> tower_lsp::jsonrpc::Result<Option<Hover>> {
+        let uri = &params.text_document_position_params.text_document.uri;
+        let position = params.text_document_position_params.position;
+
+        let (file_path, source) = match self.get_source_and_path(uri).await {
+            Some(v) => v,
             None => return Ok(None),
         };
-        let other_builds: Vec<Arc<goto::CachedBuild>> = {
-            let cache = self.ast_cache.read().await;
-            cache
-                .iter()
-                .filter(|(key, _)| **key != uri.to_string())
-                .map(|(_, v)| v.clone())
-                .collect()
-        };
-        let other_refs: Vec<&goto::CachedBuild> = other_builds.iter().map(|v| v.as_ref()).collect();
 
-        // Build a map of URI → file content from the text_cache so rename
-        // verification reads from in-memory buffers (unsaved edits) instead
-        // of from disk.
-        let text_buffers: HashMap<String, Vec<u8>> = {
-            let text_cache = self.text_cache.read().await;
-            text_cache
-                .iter()
-                .map(|(uri, (_, content))| (uri.clone(), content.as_bytes().to_vec()))
-                .collect()
+        let st = self.symbol_table.read().await;
+        Ok(hover::hover_info(&st, &file_path, &source, position))
+    }
+
+    async fn completion(
+        &self,
+        params: CompletionParams,
+    ) -> tower_lsp::jsonrpc::Result<Option<CompletionResponse>> {
+        let uri = &params.text_document_position.text_document.uri;
+        let position = params.text_document_position.position;
+        let trigger_char = params
+            .context
+            .as_ref()
+            .and_then(|c| c.trigger_character.as_deref());
+
+        let (file_path, source) = match self.get_source_and_path(uri).await {
+            Some(v) => v,
+            None => return Ok(None),
         };
 
-        match rename::rename_symbol(
-            &cached_build,
-            &uri,
+        let st = self.symbol_table.read().await;
+        Ok(completion::handle_completion(
+            &st,
+            &file_path,
+            &source,
             position,
-            &source_bytes,
-            new_name,
-            &other_refs,
-            &text_buffers,
-        ) {
-            Some(workspace_edit) => {
-                self.client
-                    .log_message(
-                        MessageType::INFO,
-                        format!(
-                            "created rename edit with {} file(s), {} total change(s)",
-                            workspace_edit
-                                .changes
-                                .as_ref()
-                                .map(|c| c.len())
-                                .unwrap_or(0),
-                            workspace_edit
-                                .changes
-                                .as_ref()
-                                .map(|c| c.values().map(|v| v.len()).sum::<usize>())
-                                .unwrap_or(0)
-                        ),
-                    )
-                    .await;
+            trigger_char,
+        ))
+    }
 
-                // Return the full WorkspaceEdit to the client so the editor
-                // applies all changes (including cross-file renames) via the
-                // LSP protocol. This keeps undo working and avoids writing
-                // files behind the editor's back.
-                Ok(Some(workspace_edit))
-            }
+    async fn document_symbol(
+        &self,
+        params: DocumentSymbolParams,
+    ) -> tower_lsp::jsonrpc::Result<Option<DocumentSymbolResponse>> {
+        let uri = &params.text_document.uri;
 
-            None => {
-                self.client
-                    .log_message(MessageType::INFO, "No locations found for renaming")
-                    .await;
-                Ok(None)
-            }
+        let (file_path, source) = match self.get_source_and_path(uri).await {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+
+        let st = self.symbol_table.read().await;
+        let symbols = symbols::document_symbols(&st, &file_path, &source);
+        if symbols.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(DocumentSymbolResponse::Nested(symbols)))
         }
     }
 
@@ -935,203 +567,32 @@ impl LanguageServer for ForgeLsp {
         &self,
         params: WorkspaceSymbolParams,
     ) -> tower_lsp::jsonrpc::Result<Option<Vec<SymbolInformation>>> {
-        self.client
-            .log_message(MessageType::INFO, "got workspace/symbol request")
-            .await;
-
-        // Use a cached AST if available (any entry has the full workspace build).
-        // Fall back to a fresh build only on cache miss.
-        let ast_data = {
-            let cache = self.ast_cache.read().await;
-            cache.values().next().map(|cb| cb.ast.clone())
-        };
-        let ast_data = match ast_data {
-            Some(data) => data,
-            None => {
-                let current_dir = std::env::current_dir().ok();
-                if let Some(dir) = current_dir {
-                    let path_str = dir.to_str().unwrap_or(".");
-                    match self.compiler.ast(path_str).await {
-                        Ok(data) => data,
-                        Err(e) => {
-                            self.client
-                                .log_message(
-                                    MessageType::WARNING,
-                                    format!("failed to get ast data: {e}"),
-                                )
-                                .await;
-                            return Ok(None);
-                        }
-                    }
-                } else {
-                    self.client
-                        .log_message(MessageType::ERROR, "could not get current directory")
-                        .await;
-                    return Ok(None);
-                }
-            }
-        };
-
-        let mut all_symbols = symbols::extract_symbols(&ast_data);
-        if !params.query.is_empty() {
-            let query = params.query.to_lowercase();
-            all_symbols.retain(|symbol| symbol.name.to_lowercase().contains(&query));
-        }
-        if all_symbols.is_empty() {
-            self.client
-                .log_message(MessageType::INFO, "No symbols found")
-                .await;
-            Ok(None)
-        } else {
-            self.client
-                .log_message(
-                    MessageType::INFO,
-                    format!("found {} symbol", all_symbols.len()),
-                )
-                .await;
-            Ok(Some(all_symbols))
-        }
-    }
-
-    async fn document_symbol(
-        &self,
-        params: DocumentSymbolParams,
-    ) -> tower_lsp::jsonrpc::Result<Option<DocumentSymbolResponse>> {
-        self.client
-            .log_message(MessageType::INFO, "got textDocument/documentSymbol request")
-            .await;
-        let uri = params.text_document.uri;
-        let file_path = match uri.to_file_path() {
-            Ok(path) => path,
-            Err(_) => {
-                self.client
-                    .log_message(MessageType::ERROR, "invalid file uri")
-                    .await;
-                return Ok(None);
-            }
-        };
-
-        let path_str = match file_path.to_str() {
-            Some(s) => s,
-            None => {
-                self.client
-                    .log_message(MessageType::ERROR, "invalid path")
-                    .await;
-                return Ok(None);
-            }
-        };
-        // Use cached AST if available, otherwise fetch fresh
-        let cached_build = self.get_or_fetch_build(&uri, &file_path, false).await;
-        let cached_build = match cached_build {
-            Some(cb) => cb,
-            None => return Ok(None),
-        };
-        let symbols = symbols::extract_document_symbols(&cached_build.ast, path_str);
+        let st = self.symbol_table.read().await;
+        let symbols = symbols::workspace_symbols(&st, &params.query);
         if symbols.is_empty() {
-            self.client
-                .log_message(MessageType::INFO, "no document symbols found")
-                .await;
             Ok(None)
         } else {
-            self.client
-                .log_message(
-                    MessageType::INFO,
-                    format!("found {} document symbols", symbols.len()),
-                )
-                .await;
-            Ok(Some(DocumentSymbolResponse::Nested(symbols)))
+            Ok(Some(symbols))
         }
-    }
-
-    async fn hover(&self, params: HoverParams) -> tower_lsp::jsonrpc::Result<Option<Hover>> {
-        self.client
-            .log_message(MessageType::INFO, "got textDocument/hover request")
-            .await;
-
-        let uri = params.text_document_position_params.text_document.uri;
-        let position = params.text_document_position_params.position;
-
-        let file_path = match uri.to_file_path() {
-            Ok(path) => path,
-            Err(_) => {
-                self.client
-                    .log_message(MessageType::ERROR, "invalid file uri")
-                    .await;
-                return Ok(None);
-            }
-        };
-
-        let source_bytes = match self.get_source_bytes(&uri, &file_path).await {
-            Some(bytes) => bytes,
-            None => return Ok(None),
-        };
-
-        let cached_build = self.get_or_fetch_build(&uri, &file_path, false).await;
-        let cached_build = match cached_build {
-            Some(cb) => cb,
-            None => return Ok(None),
-        };
-
-        let result = hover::hover_info(&cached_build.ast, &uri, position, &source_bytes);
-
-        if result.is_some() {
-            self.client
-                .log_message(MessageType::INFO, "hover info found")
-                .await;
-        } else {
-            self.client
-                .log_message(MessageType::INFO, "no hover info found")
-                .await;
-        }
-
-        Ok(result)
     }
 
     async fn document_link(
         &self,
         params: DocumentLinkParams,
     ) -> tower_lsp::jsonrpc::Result<Option<Vec<DocumentLink>>> {
-        self.client
-            .log_message(MessageType::INFO, "got textDocument/documentLink request")
-            .await;
+        let uri = &params.text_document.uri;
 
-        let uri = params.text_document.uri;
-        let file_path = match uri.to_file_path() {
-            Ok(path) => path,
-            Err(_) => {
-                self.client
-                    .log_message(MessageType::ERROR, "invalid file uri")
-                    .await;
-                return Ok(None);
-            }
-        };
-
-        let source_bytes = match self.get_source_bytes(&uri, &file_path).await {
-            Some(bytes) => bytes,
+        let (file_path, source) = match self.get_source_and_path(uri).await {
+            Some(v) => v,
             None => return Ok(None),
         };
 
-        let cached_build = self.get_or_fetch_build(&uri, &file_path, false).await;
-        let cached_build = match cached_build {
-            Some(cb) => cb,
-            None => return Ok(None),
-        };
-
-        let result = links::document_links(&cached_build, &uri, &source_bytes);
-
-        if result.is_empty() {
-            self.client
-                .log_message(MessageType::INFO, "no document links found")
-                .await;
+        let st = self.symbol_table.read().await;
+        let links = links::document_links(&st, &file_path, &source);
+        if links.is_empty() {
             Ok(None)
         } else {
-            self.client
-                .log_message(
-                    MessageType::INFO,
-                    format!("found {} document links", result.len()),
-                )
-                .await;
-            Ok(Some(result))
+            Ok(Some(links))
         }
     }
 }

@@ -1,55 +1,121 @@
-use solidity_language_server::lint::lint_output_to_diagnostics;
+use solidity_language_server::lint::LintEngine;
+use solidity_language_server::parser::TsParser;
 
-/// Inline forge lint JSON output for the contract:
-/// ```solidity
-/// // SPDX-License-Identifier: MIT
-/// pragma solidity ^0.8.29;
-///
-/// contract A {
-///     function add_num(uint256 a) public pure returns (uint256) {
-///         return a + 4;
-///     }
-/// }
-/// ```
-///
-/// Produced by: `forge lint src/Contract.sol --json 2>&1`
-static LINT_OUTPUT: &str = r#"{"$message_type":"diagnostic","message":"function names should use mixedCase","code":{"code":"mixed-case-function","explanation":null},"level":"note","spans":[{"file_name":"src/Contract.sol","byte_start":84,"byte_end":91,"line_start":5,"line_end":5,"column_start":14,"column_end":21,"is_primary":true,"text":[{"text":"    function add_num(uint256 a) public pure returns (uint256) {","highlight_start":14,"highlight_end":21}],"label":null,"suggested_replacement":null}],"children":[{"message":"https://book.getfoundry.sh/reference/forge/forge-lint#mixed-case-function","code":null,"level":"help","spans":[],"children":[],"rendered":null},{"message":"consider using","code":null,"level":"help","spans":[{"file_name":"src/Contract.sol","byte_start":84,"byte_end":91,"line_start":5,"line_end":5,"column_start":14,"column_end":21,"is_primary":true,"text":[{"text":"    function add_num(uint256 a) public pure returns (uint256) {","highlight_start":14,"highlight_end":21}],"label":null,"suggested_replacement":"addNum"}],"children":[],"rendered":null}],"rendered":"note[mixed-case-function]: function names should use mixedCase\n --> src/Contract.sol:5:14\n  |\n5 |     function add_num(uint256 a) public pure returns (uint256) {\n  |              ^^^^^^^ help: consider using: `addNum`\n  |\n  = help: https://book.getfoundry.sh/reference/forge/forge-lint#mixed-case-function\n\n"}"#;
-
-fn load_lint_output() -> serde_json::Value {
-    let diag: serde_json::Value = serde_json::from_str(LINT_OUTPUT).unwrap();
-    serde_json::Value::Array(vec![diag])
+/// Helper: parse source with tree-sitter and run lint engine, return diagnostics.
+fn lint(source: &str) -> Vec<tower_lsp::lsp_types::Diagnostic> {
+    let mut parser = TsParser::new();
+    let tree = parser.parse(source, None).expect("parse failed");
+    let engine = LintEngine::new();
+    engine.run(&tree, source)
 }
 
 #[test]
-fn test_lint_output_parses_as_array() {
-    let json_value = load_lint_output();
-    assert!(json_value.is_array(), "Expected lint output to be an array");
-    assert_eq!(json_value.as_array().unwrap().len(), 1);
+fn test_mixed_case_function_lint() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract A {
+    function add_num(uint256 a) public pure returns (uint256) {
+        return a + 4;
+    }
 }
-
-#[test]
-fn test_lint_diagnosis_output() {
-    let json_value = load_lint_output();
-    let diagnostics = lint_output_to_diagnostics(&json_value, "src/Contract.sol");
-    assert!(!diagnostics.is_empty(), "Expected diagnostics");
-}
-
-#[test]
-fn test_lint_to_lsp_diagnostics() {
-    let json_value = load_lint_output();
-    let diagnostics = lint_output_to_diagnostics(&json_value, "src/Contract.sol");
-    assert!(!diagnostics.is_empty(), "Expected at least one diagnostic");
-
-    let first_diag = &diagnostics[0];
-    assert_eq!(first_diag.source, Some("forge-lint".to_string()));
-    assert_eq!(
-        first_diag.message,
-        "[forge lint] function names should use mixedCase"
+"#;
+    let diags = lint(source);
+    let mixed_case: Vec<_> = diags
+        .iter()
+        .filter(|d| {
+            d.code
+                == Some(tower_lsp::lsp_types::NumberOrString::String(
+                    "mixed-case-function".to_string(),
+                ))
+        })
+        .collect();
+    assert!(
+        !mixed_case.is_empty(),
+        "Expected mixed-case-function lint diagnostic"
     );
-    assert_eq!(
-        first_diag.severity,
-        Some(tower_lsp::lsp_types::DiagnosticSeverity::INFORMATION)
+    assert!(
+        mixed_case[0].message.contains("add_num"),
+        "Diagnostic should mention the function name"
     );
-    assert_eq!(first_diag.range.start.line, 4);
-    assert_eq!(first_diag.range.start.character, 13);
+}
+
+#[test]
+fn test_pascal_case_function_no_false_positive() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract A {
+    function addNum(uint256 a) public pure returns (uint256) {
+        return a + 4;
+    }
+}
+"#;
+    let diags = lint(source);
+    let mixed_case: Vec<_> = diags
+        .iter()
+        .filter(|d| {
+            d.code
+                == Some(tower_lsp::lsp_types::NumberOrString::String(
+                    "mixed-case-function".to_string(),
+                ))
+        })
+        .collect();
+    assert!(
+        mixed_case.is_empty(),
+        "Should not fire mixed-case-function for properly named function"
+    );
+}
+
+#[test]
+fn test_custom_errors_lint() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract A {
+    function foo() public {
+        require(msg.sender != address(0), "not allowed");
+    }
+}
+"#;
+    let diags = lint(source);
+    let custom_errors: Vec<_> = diags
+        .iter()
+        .filter(|d| {
+            d.code
+                == Some(tower_lsp::lsp_types::NumberOrString::String(
+                    "custom-errors".to_string(),
+                ))
+        })
+        .collect();
+    assert!(
+        !custom_errors.is_empty(),
+        "Expected custom-errors lint diagnostic for require with string"
+    );
+}
+
+#[test]
+fn test_no_lint_on_clean_code() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Clean {
+    uint256 public value;
+
+    function setValue(uint256 newValue) public {
+        value = newValue;
+    }
+}
+"#;
+    let diags = lint(source);
+    // Clean code should have no linting issues (or very few)
+    let lint_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| d.source == Some("ts-lint".to_string()))
+        .collect();
+    assert!(
+        lint_diags.is_empty(),
+        "Clean code should not trigger lint rules, got: {:?}",
+        lint_diags
+    );
 }

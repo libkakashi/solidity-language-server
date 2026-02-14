@@ -1,13 +1,14 @@
-pub mod build;
 pub mod completion;
 pub mod goto;
 pub mod hover;
+pub mod import_resolver;
 pub mod links;
 pub mod lint;
 pub mod lsp;
+pub mod parser;
 pub mod references;
 pub mod rename;
-pub mod runner;
-pub mod solar_runner;
+pub mod solar_checker;
+pub mod symbol_table;
 pub mod symbols;
 pub mod utils;

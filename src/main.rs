@@ -1,29 +1,17 @@
 use clap::Parser;
 use eyre::Result;
-use solidity_language_server::lsp::ForgeLsp;
+use solidity_language_server::lsp::SolLsp;
 use tower_lsp::{LspService, Server};
 use tracing::info;
-
-#[derive(Clone, Debug, clap::ValueEnum)]
-pub enum CompletionMode {
-    /// Pre-built completions, zero per-request computation (default)
-    Fast,
-    /// Full completions with per-request scope filtering (for power users)
-    Full,
-}
 
 #[derive(Clone, Debug, Parser)]
 #[command(
     version = env!("LONG_VERSION"),
-    about = "solidity-language-server, a Solidity LSP powered by foundry"
+    about = "solidity-language-server, a Solidity LSP powered by tree-sitter"
 )]
 pub struct LspArgs {
     #[arg(long)]
     pub stdio: bool,
-    #[arg(long)]
-    pub use_solar: bool,
-    #[arg(long, value_enum, default_value_t = CompletionMode::Fast)]
-    pub completion_mode: CompletionMode,
 }
 
 impl LspArgs {
@@ -40,9 +28,7 @@ impl LspArgs {
 
         let stdin = tokio::io::stdin();
         let stdout = tokio::io::stdout();
-        let fast_completions = matches!(self.completion_mode, CompletionMode::Fast);
-        let (service, socket) =
-            LspService::new(|client| ForgeLsp::new(client, self.use_solar, fast_completions));
+        let (service, socket) = LspService::new(SolLsp::new);
         Server::new(stdin, stdout, socket).serve(service).await;
 
         info!("Solidity LSP Server stopped.");
