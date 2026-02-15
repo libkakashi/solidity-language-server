@@ -344,6 +344,48 @@ contract Pair {
 }
 
 #[test]
+fn find_references_distinct_types_in_multiple_returns() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Exchange {
+    struct Price {
+        uint256 value;
+    }
+
+    struct Volume {
+        uint256 amount;
+    }
+
+    function quote() external pure returns (Price memory, Volume memory) {
+        return (Price(0), Volume(0));
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    // Check references to Price: 1 decl + 1 return type + 1 constructor call = 3
+    let price_pos = first_position(source, "Price");
+    let price_refs = find_references(&st, &path, source, price_pos, true);
+    assert_eq!(
+        price_refs.len(),
+        3,
+        "Expected 3 references for Price, got {:?}",
+        price_refs
+    );
+
+    // Check references to Volume: 1 decl + 1 return type + 1 constructor call = 3
+    let volume_pos = first_position(source, "Volume");
+    let volume_refs = find_references(&st, &path, source, volume_pos, true);
+    assert_eq!(
+        volume_refs.len(),
+        3,
+        "Expected 3 references for Volume, got {:?}",
+        volume_refs
+    );
+}
+
+#[test]
 fn find_references_contract_type_in_function_signature() {
     let source = r#"// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.29;
