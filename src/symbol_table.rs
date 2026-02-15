@@ -936,6 +936,14 @@ fn walk_function(
 
     walk_modifier_invocations(node, fn_scope, source, fi);
 
+    // Walk parameter types so user-defined types generate references.
+    walk_parameter_types(node, fn_scope, file_id, source, fi);
+
+    // Walk return type so user-defined types generate references.
+    if let Some(return_type) = node.child_by_field_name("return_type") {
+        walk_parameter_types(&return_type, fn_scope, file_id, source, fi);
+    }
+
     if let Some(body) = node.child_by_field_name("body") {
         walk_children(&body, fn_scope, file_id, source, fi);
     }
@@ -978,6 +986,8 @@ fn walk_constructor(
     }
 
     fi.declarations.insert(decl_id, decl);
+
+    walk_parameter_types(node, fn_scope, file_id, source, fi);
 
     if let Some(body) = node.child_by_field_name("body") {
         walk_children(&body, fn_scope, file_id, source, fi);
@@ -1029,6 +1039,8 @@ fn walk_fallback_receive(
 
     fi.declarations.insert(decl_id, decl);
 
+    walk_parameter_types(node, fn_scope, file_id, source, fi);
+
     if let Some(body) = node.child_by_field_name("body") {
         walk_children(&body, fn_scope, file_id, source, fi);
     }
@@ -1067,6 +1079,8 @@ fn walk_modifier(
     let name = decl.name.clone();
     fi.declarations.insert(decl_id, decl);
     register_in_scope(fi, parent_scope, &name, &decl_id);
+
+    walk_parameter_types(node, mod_scope, file_id, source, fi);
 
     if let Some(body) = node.child_by_field_name("body") {
         walk_children(&body, mod_scope, file_id, source, fi);
@@ -1283,6 +1297,9 @@ fn walk_event(node: &Node, scope_id: ScopeId, file_id: FileId, source: &str, fi:
                     .child_by_field_name("name")
                     .map(|n| node_text(&n, source).to_string())
                     .unwrap_or_default();
+                if let Some(type_node) = child.child_by_field_name("type") {
+                    walk_node(&type_node, scope_id, file_id, source, fi);
+                }
                 params.push((ptype, pname));
             }
             if !cursor.goto_next_sibling() {
@@ -1331,6 +1348,9 @@ fn walk_error_decl(
                     .child_by_field_name("name")
                     .map(|n| node_text(&n, source).to_string())
                     .unwrap_or_default();
+                if let Some(type_node) = child.child_by_field_name("type") {
+                    walk_node(&type_node, scope_id, file_id, source, fi);
+                }
                 params.push((ptype, pname));
             }
             if !cursor.goto_next_sibling() {
@@ -1653,6 +1673,31 @@ fn extract_parameters(
         }
     }
     params
+}
+
+/// Walk the type nodes of `parameter` children so that user-defined types
+/// inside function parameters / return parameters generate references.
+fn walk_parameter_types(
+    node: &Node,
+    scope_id: ScopeId,
+    file_id: FileId,
+    source: &str,
+    fi: &mut FileIndex,
+) {
+    let mut cursor = node.walk();
+    if cursor.goto_first_child() {
+        loop {
+            let child = cursor.node();
+            if child.kind() == "parameter" {
+                if let Some(type_node) = child.child_by_field_name("type") {
+                    walk_node(&type_node, scope_id, file_id, source, fi);
+                }
+            }
+            if !cursor.goto_next_sibling() {
+                break;
+            }
+        }
+    }
 }
 
 fn extract_return_parameters(node: &Node, source: &str) -> Vec<(String, String)> {
