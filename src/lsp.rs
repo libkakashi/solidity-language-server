@@ -95,6 +95,7 @@ async fn solar_worker(
     client: Client,
     ts_diag_cache: Arc<RwLock<HashMap<String, Vec<Diagnostic>>>>,
     latest_seq: Arc<std::sync::atomic::AtomicU64>,
+    symbol_table: Arc<RwLock<SymbolTable>>,
 ) {
     while let Some(mut msg) = rx.recv().await {
         // Drain queued messages — only process the latest.
@@ -104,12 +105,23 @@ async fn solar_worker(
 
         let my_seq = msg.seq;
 
+        // Read resolver config from symbol table.
+        let solar_config = {
+            let st = symbol_table.read().await;
+            solar_checker::SolarConfig {
+                remappings: st.resolver.remappings().to_vec(),
+                include_paths: st.resolver.include_paths().to_vec(),
+                base_path: Some(st.resolver.project_root().to_path_buf()),
+            }
+        };
+
         // Run solar on a blocking thread.
         let file_path = msg.file_path.clone();
-        let solar_diags =
-            tokio::task::spawn_blocking(move || solar_checker::check_file(&file_path))
-                .await
-                .unwrap_or_default();
+        let solar_diags = tokio::task::spawn_blocking(move || {
+            solar_checker::check_file(&file_path, &solar_config)
+        })
+        .await
+        .unwrap_or_default();
 
         // Check if a newer ts_worker result has arrived since we started.
         // If so, our ts_diag_cache may be stale — skip merging. (Fix #2)
@@ -306,6 +318,7 @@ impl LanguageServer for SolLsp {
                 self.client.clone(),
                 self.ts_diag_cache.clone(),
                 self.seq.clone(),
+                self.symbol_table.clone(),
             ));
         }
 

@@ -166,6 +166,8 @@ pub struct MemberInfo {
     pub type_text: String,
     pub kind: DeclKind,
     pub name_range: (usize, usize),
+    /// DeclId for this member, if it has a full Declaration entry.
+    pub decl_id: Option<DeclId>,
 }
 
 pub type ScopeId = usize;
@@ -228,6 +230,10 @@ pub struct Reference {
     pub range: (usize, usize),
     pub scope: ScopeId,
     pub resolved: Option<DeclId>,
+    /// If this reference is the property part of a qualified name (e.g. the
+    /// `FeeUpdated` in `IFees.FeeUpdated`), this stores the index of the
+    /// object/container reference in the same `FileIndex.references` vec.
+    pub member_of: Option<usize>,
 }
 
 impl Reference {
@@ -657,22 +663,29 @@ fn walk_node(node: &Node, scope_id: ScopeId, file_id: FileId, source: &str, fi: 
                         range: (node.start_byte(), node.end_byte()),
                         scope: scope_id,
                         resolved: None,
+                        member_of: None,
                     });
                 }
             }
         }
         "user_defined_type" => {
+            // Handle qualified types like `IFees.FeeUpdated` which have
+            // multiple identifier children.  The first is the container, the
+            // rest are members.
             let mut cursor = node.walk();
+            let mut prev_ref_idx: Option<usize> = None;
             if cursor.goto_first_child() {
                 loop {
                     let child = cursor.node();
                     if child.kind() == "identifier" {
+                        let idx = fi.references.len();
                         fi.references.push(Reference {
                             range: (child.start_byte(), child.end_byte()),
                             scope: scope_id,
                             resolved: None,
+                            member_of: prev_ref_idx,
                         });
-                        break;
+                        prev_ref_idx = Some(idx);
                     }
                     if !cursor.goto_next_sibling() {
                         break;
@@ -681,17 +694,44 @@ fn walk_node(node: &Node, scope_id: ScopeId, file_id: FileId, source: &str, fi: 
             }
         }
         "member_expression" => {
+            let obj_ref_start = fi.references.len();
             if let Some(obj) = node.child_by_field_name("object") {
                 walk_node(&obj, scope_id, file_id, source, fi);
             }
             if let Some(prop) = node.child_by_field_name("property") {
+                // The object's reference is the last one pushed by walk_node.
+                // For chained access (a.b.c), this is the innermost property.
+                let obj_ref_idx = if fi.references.len() > obj_ref_start {
+                    Some(fi.references.len() - 1)
+                } else {
+                    None
+                };
                 fi.references.push(Reference {
                     range: (prop.start_byte(), prop.end_byte()),
                     scope: scope_id,
                     resolved: None,
+                    member_of: obj_ref_idx,
                 });
             }
             return;
+        }
+        "call_struct_argument" => {
+            // Struct literal field: `{fieldName: value}`.
+            // The first identifier is the field name — skip it (don't create a
+            // reference that would resolve to a same-named local variable).
+            // Only walk the expression (value) child.
+            let mut cursor = node.walk();
+            if cursor.goto_first_child() {
+                loop {
+                    let child = cursor.node();
+                    if child.kind() == "expression" {
+                        walk_node(&child, scope_id, file_id, source, fi);
+                    }
+                    if !cursor.goto_next_sibling() {
+                        break;
+                    }
+                }
+            }
         }
         _ => {
             walk_children(node, scope_id, file_id, source, fi);
@@ -795,6 +835,7 @@ fn walk_contract(
                                     range: (inner.node().start_byte(), inner.node().end_byte()),
                                     scope: parent_scope,
                                     resolved: None,
+                                    member_of: None,
                                 });
                                 break;
                             }
@@ -826,6 +867,7 @@ fn walk_contract(
                                 type_text: "function".to_string(),
                                 kind: DeclKind::Function,
                                 name_range: (n.start_byte(), n.end_byte()),
+                                decl_id: None,
                             });
                         }
                     }
@@ -840,6 +882,7 @@ fn walk_contract(
                                 type_text,
                                 kind: DeclKind::StateVariable,
                                 name_range: (n.start_byte(), n.end_byte()),
+                                decl_id: None,
                             });
                         }
                     }
@@ -862,6 +905,7 @@ fn walk_contract(
                                 type_text: child.kind().to_string(),
                                 kind: mk,
                                 name_range: (n.start_byte(), n.end_byte()),
+                                decl_id: None,
                             });
                         }
                     }
@@ -907,7 +951,7 @@ fn walk_function(
 
     let fn_scope = create_scope(fi, Some(parent_scope), ScopeKind::Function, node);
     let parameters = extract_parameters(node, source, fi, fn_scope, file_id);
-    let return_parameters = extract_return_parameters(node, source);
+    let return_parameters = extract_return_parameters(node, source, fi, fn_scope, file_id);
     let visibility = extract_child_kind(node, "visibility", source);
     let state_mutability = extract_child_kind(node, "state_mutability", source);
     let natspec = extract_natspec(node, source);
@@ -1193,11 +1237,25 @@ fn walk_struct(node: &Node, scope_id: ScopeId, file_id: FileId, source: &str, fi
                             .child_by_field_name("type")
                             .map(|t| node_text(&t, source).to_string())
                             .unwrap_or_default();
+
+                        // Register struct field as a Declaration.
+                        let (field_decl_id, mut field_decl) = make_decl(
+                            file_id,
+                            &mname,
+                            &child,
+                            source,
+                            DeclKind::StateVariable,
+                            scope_id,
+                        );
+                        field_decl.type_text = Some(mtype.clone());
+                        fi.declarations.insert(field_decl_id, field_decl);
+
                         members.push(MemberInfo {
                             name: node_text(&mname, source).to_string(),
                             type_text: mtype,
                             kind: DeclKind::StateVariable,
                             name_range: (mname.start_byte(), mname.end_byte()),
+                            decl_id: Some(field_decl_id),
                         });
                     }
                 }
@@ -1236,13 +1294,46 @@ fn walk_enum(node: &Node, scope_id: ScopeId, file_id: FileId, source: &str, fi: 
     let natspec = extract_natspec(node, source);
 
     let mut enum_values = Vec::new();
+    let mut members = Vec::new();
     if let Some(body) = node.child_by_field_name("body") {
         let mut cursor = body.walk();
         if cursor.goto_first_child() {
             loop {
                 let child = cursor.node();
                 if child.kind() == "enum_value" {
-                    enum_values.push(node_text(&child, source).to_string());
+                    let val_name = node_text(&child, source).to_string();
+
+                    // Register enum value as a Declaration.
+                    let val_decl_id = DeclId {
+                        file: file_id,
+                        byte_offset: child.start_byte(),
+                    };
+                    let val_decl = Declaration {
+                        id: val_decl_id,
+                        name: val_name.clone(),
+                        kind: DeclKind::EnumValue,
+                        full_range: (child.start_byte(), child.end_byte()),
+                        name_range: (child.start_byte(), child.end_byte()),
+                        scope: scope_id,
+                        type_text: Some(enum_name.clone()),
+                        visibility: None,
+                        state_mutability: None,
+                        is_constant: false,
+                        is_immutable: false,
+                        natspec: None,
+                        extras: None,
+                    };
+                    fi.declarations.insert(val_decl_id, val_decl);
+
+                    members.push(MemberInfo {
+                        name: val_name.clone(),
+                        type_text: enum_name.clone(),
+                        kind: DeclKind::EnumValue,
+                        name_range: (child.start_byte(), child.end_byte()),
+                        decl_id: Some(val_decl_id),
+                    });
+
+                    enum_values.push(val_name);
                 }
                 if !cursor.goto_next_sibling() {
                     break;
@@ -1250,16 +1341,6 @@ fn walk_enum(node: &Node, scope_id: ScopeId, file_id: FileId, source: &str, fi: 
             }
         }
     }
-
-    let members: Vec<MemberInfo> = enum_values
-        .iter()
-        .map(|v| MemberInfo {
-            name: v.clone(),
-            type_text: enum_name.clone(),
-            kind: DeclKind::EnumValue,
-            name_range: (0, 0),
-        })
-        .collect();
 
     let (decl_id, mut decl) =
         make_decl(file_id, &name_node, node, source, DeclKind::Enum, scope_id);
@@ -1700,7 +1781,13 @@ fn walk_parameter_types(
     }
 }
 
-fn extract_return_parameters(node: &Node, source: &str) -> Vec<(String, String)> {
+fn extract_return_parameters(
+    node: &Node,
+    source: &str,
+    fi: &mut FileIndex,
+    fn_scope: ScopeId,
+    file_id: FileId,
+) -> Vec<(String, String)> {
     let return_type = match node.child_by_field_name("return_type") {
         Some(rt) => rt,
         None => return Vec::new(),
@@ -1719,6 +1806,23 @@ fn extract_return_parameters(node: &Node, source: &str) -> Vec<(String, String)>
                     .child_by_field_name("name")
                     .map(|n| node_text(&n, source).to_string())
                     .unwrap_or_default();
+
+                if let Some(name_node) = child.child_by_field_name("name") {
+                    let (decl_id, mut decl) = make_decl(
+                        file_id,
+                        &name_node,
+                        &child,
+                        source,
+                        DeclKind::Parameter,
+                        fn_scope,
+                    );
+                    decl.type_text = Some(ptype.clone());
+
+                    let pname_clone = decl.name.clone();
+                    fi.declarations.insert(decl_id, decl);
+                    register_in_scope(fi, fn_scope, &pname_clone, &decl_id);
+                }
+
                 params.push((ptype, pname));
             }
             if !cursor.goto_next_sibling() {
@@ -1775,6 +1879,7 @@ fn walk_modifier_invocations(node: &Node, scope_id: ScopeId, _source: &str, fi: 
                                 range: (ic.start_byte(), ic.end_byte()),
                                 scope: scope_id,
                                 resolved: None,
+                                member_of: None,
                             });
                             break;
                         }
@@ -1933,12 +2038,12 @@ fn resolve_references(st: &mut SymbolTable, file_id: FileId) {
             None => return,
         };
         let source = st.sources.get(&file_id).cloned().unwrap_or_default();
-        let unresolved: Vec<(usize, usize, usize, ScopeId)> = fi
+        let unresolved: Vec<(usize, usize, usize, ScopeId, Option<usize>)> = fi
             .references
             .iter()
             .enumerate()
             .filter(|(_, r)| r.resolved.is_none())
-            .map(|(i, r)| (i, r.range.0, r.range.1, r.scope))
+            .map(|(i, r)| (i, r.range.0, r.range.1, r.scope, r.member_of))
             .collect();
         // We only clone the scope declarations (Vec<(String, DeclId)>) and imports,
         // not the full declarations HashMap.
@@ -1951,7 +2056,11 @@ fn resolve_references(st: &mut SymbolTable, file_id: FileId) {
         (unresolved, scope_snapshot, import_snapshot, source)
     };
 
-    for (idx, start, end, scope_id) in unresolved {
+    // Pass 1: resolve non-member references (normal scope-chain + imports).
+    for &(idx, start, end, scope_id, member_of) in &unresolved {
+        if member_of.is_some() {
+            continue;
+        }
         let name = &source[start..end];
         let resolved = resolve_single(
             name,
@@ -1962,7 +2071,29 @@ fn resolve_references(st: &mut SymbolTable, file_id: FileId) {
             st,
         );
 
-        // Update the reference and add to reverse index.
+        if let Some(ref decl_id) = resolved {
+            st.ref_index
+                .entry(*decl_id)
+                .or_default()
+                .push((file_id, start, end));
+        }
+        if let Some(fi) = st.files.get_mut(&file_id) {
+            if let Some(r) = fi.references.get_mut(idx) {
+                r.resolved = resolved;
+            }
+        }
+    }
+
+    // Pass 2: resolve member references (property part of dot expressions).
+    for &(idx, start, end, _scope_id, member_of) in &unresolved {
+        let container_ref_idx = match member_of {
+            Some(i) => i,
+            None => continue,
+        };
+
+        let member_name = &source[start..end];
+        let resolved = resolve_member(st, file_id, container_ref_idx, member_name);
+
         if let Some(ref decl_id) = resolved {
             st.ref_index
                 .entry(*decl_id)
@@ -1995,6 +2126,40 @@ fn resolve_single(
             current = *parent;
         } else {
             break;
+        }
+    }
+
+    // 1.5. Search inherited base contracts.
+    // Walk the scope chain again to find the enclosing contract scope, then
+    // search base contracts for the name.
+    if let Some(fi) = st.files.get(&file_id) {
+        let mut current = Some(scope_id);
+        while let Some(sid) = current {
+            if let Some(scope) = fi.scopes.get(sid) {
+                if matches!(scope.kind, ScopeKind::Contract | ScopeKind::Interface) {
+                    // Find the contract declaration that owns this scope.
+                    for decl in fi.declarations.values() {
+                        if matches!(decl.kind, DeclKind::Contract | DeclKind::Interface)
+                            && scope.range.0 >= decl.full_range.0
+                            && scope.range.1 <= decl.full_range.1
+                        {
+                            // Search each base contract.
+                            for base_name in decl.base_contracts() {
+                                if let Some(result) =
+                                    resolve_in_base_contract(st, file_id, base_name, name)
+                                {
+                                    return Some(result);
+                                }
+                            }
+                            break;
+                        }
+                    }
+                    break;
+                }
+                current = scope.parent;
+            } else {
+                break;
+            }
         }
     }
 
@@ -2044,6 +2209,244 @@ fn resolve_single(
         }
     }
 
+    None
+}
+
+// ---------------------------------------------------------------------------
+// Member resolution helpers
+// ---------------------------------------------------------------------------
+
+/// Resolve a member name by looking inside the container that the
+/// `container_ref_idx` reference resolved to.
+fn resolve_member(
+    st: &SymbolTable,
+    file_id: FileId,
+    container_ref_idx: usize,
+    member_name: &str,
+) -> Option<DeclId> {
+    // 1. Get the container reference's resolved DeclId.
+    let container_decl_id = {
+        let fi = st.files.get(&file_id)?;
+        let container_ref = fi.references.get(container_ref_idx)?;
+        container_ref.resolved?
+    };
+
+    // 2. Get the container declaration.
+    let container_decl = st.get_declaration(&container_decl_id)?;
+    let container_kind = container_decl.kind;
+    let container_file = container_decl_id.file;
+
+    match container_kind {
+        // Namespace kinds: search members directly.
+        DeclKind::Contract | DeclKind::Interface | DeclKind::Library => {
+            find_member_in_scope(st, &container_decl_id, member_name)
+        }
+        DeclKind::Struct | DeclKind::Enum => {
+            find_member_by_decl_id(st, &container_decl_id, member_name)
+        }
+        // Variable kinds: resolve the type, then search inside it.
+        DeclKind::StateVariable
+        | DeclKind::LocalVariable
+        | DeclKind::Parameter
+        | DeclKind::Constant => {
+            let type_text = st.get_declaration(&container_decl_id)?.type_text.clone()?;
+            let base_type = strip_type_modifiers(&type_text);
+            let type_decl_id = find_type_declaration(st, container_file, base_type)?;
+            let type_decl = st.get_declaration(&type_decl_id)?;
+            match type_decl.kind {
+                DeclKind::Contract | DeclKind::Interface | DeclKind::Library => {
+                    find_member_in_scope(st, &type_decl_id, member_name)
+                }
+                DeclKind::Struct | DeclKind::Enum => {
+                    find_member_by_decl_id(st, &type_decl_id, member_name)
+                }
+                _ => None,
+            }
+        }
+        // Import alias: search the imported file's top-level declarations.
+        DeclKind::ImportAlias => {
+            resolve_import_alias_member(st, file_id, &container_decl_id, member_name)
+        }
+        _ => None,
+    }
+}
+
+/// Resolve a name inside a base contract (for inheritance lookup).
+/// Finds the base contract declaration (in the current file or imports), then
+/// searches its scope for the name.
+fn resolve_in_base_contract(
+    st: &SymbolTable,
+    file_id: FileId,
+    base_name: &str,
+    member_name: &str,
+) -> Option<DeclId> {
+    // Find the base contract declaration.
+    let base_decl_id = find_type_declaration(st, file_id, base_name)?;
+    // Search its scope for the member.
+    find_member_in_scope(st, &base_decl_id, member_name)
+}
+
+/// Find a member inside a contract/interface/library by searching its scope.
+fn find_member_in_scope(
+    st: &SymbolTable,
+    container_decl_id: &DeclId,
+    member_name: &str,
+) -> Option<DeclId> {
+    let fi = st.files.get(&container_decl_id.file)?;
+    let container_decl = fi.declarations.get(container_decl_id)?;
+
+    // Find the scope whose range is within the container's full_range
+    // and has a matching ScopeKind.
+    for scope in &fi.scopes {
+        let in_range = scope.range.0 >= container_decl.full_range.0
+            && scope.range.1 <= container_decl.full_range.1;
+        let is_ns_scope = matches!(
+            scope.kind,
+            ScopeKind::Contract | ScopeKind::Interface | ScopeKind::Library
+        );
+        if in_range && is_ns_scope {
+            if let Some(decl_id) = scope.get_decl(member_name) {
+                return Some(*decl_id);
+            }
+        }
+    }
+    None
+}
+
+/// Find a member of a struct/enum via MemberInfo.decl_id.
+fn find_member_by_decl_id(
+    st: &SymbolTable,
+    container_decl_id: &DeclId,
+    member_name: &str,
+) -> Option<DeclId> {
+    let container_decl = st.get_declaration(container_decl_id)?;
+    for member in container_decl.members() {
+        if member.name == member_name {
+            return member.decl_id;
+        }
+    }
+    None
+}
+
+/// Find a type declaration by name, searching the given file and its imports.
+fn find_type_declaration(st: &SymbolTable, origin_file: FileId, type_name: &str) -> Option<DeclId> {
+    if let Some(fi) = st.files.get(&origin_file) {
+        // Search current file.
+        for decl in fi.declarations.values() {
+            if decl.name == type_name && is_member_bearing_kind(decl.kind) {
+                return Some(decl.id);
+            }
+        }
+        // Search imported files.
+        let imports: Vec<ImportInfo> = fi.imports.clone();
+        for imp in &imports {
+            if let Some(ref resolved_path) = imp.resolved_path {
+                if let Some(target_fid) = st.interner.lookup(resolved_path) {
+                    if let Some(target_fi) = st.files.get(&target_fid) {
+                        if let Some(decl) = find_top_level_by_name(target_fi, type_name) {
+                            if is_member_bearing_kind(decl.kind) {
+                                return Some(decl.id);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Strip array brackets, `memory`, `storage`, `calldata` suffixes from a type.
+fn strip_type_modifiers(type_text: &str) -> &str {
+    let s = type_text.trim();
+    let s = s
+        .strip_suffix(" memory")
+        .or_else(|| s.strip_suffix(" storage"))
+        .or_else(|| s.strip_suffix(" calldata"))
+        .unwrap_or(s);
+    if let Some(bracket_pos) = s.find('[') {
+        &s[..bracket_pos]
+    } else {
+        s
+    }
+    .trim()
+}
+
+/// Resolve `Alias.Member` where `Alias` is an import alias.
+/// Handles both `import "X" as Alias` and `import {Name} from "X"` where
+/// `Name` is a contract/library/interface and `Member` is accessed via dot.
+fn resolve_import_alias_member(
+    st: &SymbolTable,
+    file_id: FileId,
+    alias_decl_id: &DeclId,
+    member_name: &str,
+) -> Option<DeclId> {
+    let fi = st.files.get(&file_id)?;
+    let alias_decl = fi.declarations.get(alias_decl_id)?;
+    let alias_name = &alias_decl.name;
+
+    for imp in &fi.imports {
+        let matches = match &imp.kind {
+            ImportKind::Alias(alias) => alias == alias_name,
+            ImportKind::Named(names) => names.iter().any(|(name, al)| {
+                let local = al.as_ref().unwrap_or(name);
+                local == alias_name
+            }),
+            ImportKind::Glob => false,
+        };
+        if !matches {
+            continue;
+        }
+
+        if let Some(ref resolved_path) = imp.resolved_path {
+            if let Some(target_fid) = st.interner.lookup(resolved_path) {
+                if let Some(target_fi) = st.files.get(&target_fid) {
+                    // For Alias imports, search top-level declarations.
+                    if matches!(imp.kind, ImportKind::Alias(_)) {
+                        if let Some(decl) = find_top_level_by_name(target_fi, member_name) {
+                            return Some(decl.id);
+                        }
+                    }
+                    // For Named imports, the alias is a specific type — search its
+                    // scope for the member (e.g. MathLib.add where MathLib is a library).
+                    if let ImportKind::Named(names) = &imp.kind {
+                        let original_name = names
+                            .iter()
+                            .find(|(name, al)| {
+                                let local = al.as_ref().unwrap_or(name);
+                                local == alias_name
+                            })
+                            .map(|(name, _)| name.as_str())
+                            .unwrap_or(alias_name);
+                        // Find the actual declaration (contract/library/interface) in the target file.
+                        if let Some(container_decl) =
+                            find_top_level_by_name(target_fi, original_name)
+                        {
+                            let container_decl_id = container_decl.id;
+                            let container_kind = container_decl.kind;
+                            match container_kind {
+                                DeclKind::Contract | DeclKind::Interface | DeclKind::Library => {
+                                    return find_member_in_scope(
+                                        st,
+                                        &container_decl_id,
+                                        member_name,
+                                    );
+                                }
+                                DeclKind::Struct | DeclKind::Enum => {
+                                    return find_member_by_decl_id(
+                                        st,
+                                        &container_decl_id,
+                                        member_name,
+                                    );
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     None
 }
 
@@ -2304,5 +2707,164 @@ contract Foo {
         let x = fi.declarations.values().find(|d| d.name == "x").unwrap();
         // Local variables should have no extras allocated.
         assert!(x.extras.is_none(), "local var should not allocate extras");
+    }
+
+    #[test]
+    fn test_qualified_type_resolution() {
+        let source = r#"
+interface IFees {
+    event FeeUpdated(uint256 fee);
+}
+contract Pool {
+    function emitFee() public {
+        emit IFees.FeeUpdated(100);
+    }
+}
+"#;
+        let (st, path) = index(source);
+        let fi = get_fi(&st, &path);
+        let source_text = source;
+
+        // "FeeUpdated" in "IFees.FeeUpdated" should be resolved.
+        let fee_ref = fi
+            .references
+            .iter()
+            .find(|r| r.name(source_text) == "FeeUpdated" && r.member_of.is_some())
+            .expect("Should have a member reference for FeeUpdated");
+        assert!(fee_ref.resolved.is_some(), "FeeUpdated should be resolved");
+
+        let fee_decl = st
+            .get_declaration(fee_ref.resolved.as_ref().unwrap())
+            .unwrap();
+        assert_eq!(fee_decl.name, "FeeUpdated");
+        assert_eq!(fee_decl.kind, DeclKind::Event);
+    }
+
+    #[test]
+    fn test_struct_field_resolution() {
+        let source = r#"
+contract Foo {
+    struct Point {
+        uint256 x;
+        uint256 y;
+    }
+    function bar() public {
+        Point memory p;
+        uint256 val = p.x;
+    }
+}
+"#;
+        let (st, path) = index(source);
+        let fi = get_fi(&st, &path);
+
+        // "x" in "p.x" should be resolved to the struct field declaration.
+        let x_ref = fi
+            .references
+            .iter()
+            .find(|r| r.name(source) == "x" && r.member_of.is_some())
+            .expect("Should have a member reference for x");
+        assert!(
+            x_ref.resolved.is_some(),
+            "x should be resolved via p's type"
+        );
+
+        let x_decl = st
+            .get_declaration(x_ref.resolved.as_ref().unwrap())
+            .unwrap();
+        assert_eq!(x_decl.name, "x");
+        assert_eq!(x_decl.type_text.as_deref(), Some("uint256"));
+    }
+
+    #[test]
+    fn test_enum_value_resolution() {
+        let source = r#"
+contract Foo {
+    enum Status { Active, Paused }
+    function bar() public {
+        Status s = Status.Active;
+    }
+}
+"#;
+        let (st, path) = index(source);
+        let fi = get_fi(&st, &path);
+
+        let active_ref = fi
+            .references
+            .iter()
+            .find(|r| r.name(source) == "Active" && r.member_of.is_some())
+            .expect("Should have a member reference for Active");
+        assert!(active_ref.resolved.is_some(), "Active should be resolved");
+
+        let active_decl = st
+            .get_declaration(active_ref.resolved.as_ref().unwrap())
+            .unwrap();
+        assert_eq!(active_decl.name, "Active");
+        assert_eq!(active_decl.kind, DeclKind::EnumValue);
+    }
+
+    #[test]
+    fn test_qualified_type_in_type_position() {
+        let source = r#"
+interface IFees {
+    struct Fee {
+        uint256 amount;
+    }
+}
+contract Pool {
+    function getFee() external returns (IFees.Fee memory) {}
+    function setFee(IFees.Fee memory f) external {}
+}
+"#;
+        let (st, path) = index(source);
+        let fi = get_fi(&st, &path);
+
+        // All "Fee" references with member_of should be resolved.
+        let fee_refs: Vec<_> = fi
+            .references
+            .iter()
+            .filter(|r| r.name(source) == "Fee" && r.member_of.is_some())
+            .collect();
+        assert!(
+            fee_refs.len() >= 2,
+            "Should have at least 2 qualified Fee refs, got {}",
+            fee_refs.len()
+        );
+        for r in &fee_refs {
+            assert!(
+                r.resolved.is_some(),
+                "Fee in qualified type position should be resolved"
+            );
+        }
+    }
+
+    #[test]
+    fn test_contract_member_function_resolution() {
+        let source = r#"
+library Math {
+    function add(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a + b;
+    }
+}
+contract Foo {
+    function bar() public pure returns (uint256) {
+        return Math.add(1, 2);
+    }
+}
+"#;
+        let (st, path) = index(source);
+        let fi = get_fi(&st, &path);
+
+        let add_ref = fi
+            .references
+            .iter()
+            .find(|r| r.name(source) == "add" && r.member_of.is_some())
+            .expect("Should have a member reference for add");
+        assert!(add_ref.resolved.is_some(), "add should resolve to Math.add");
+
+        let add_decl = st
+            .get_declaration(add_ref.resolved.as_ref().unwrap())
+            .unwrap();
+        assert_eq!(add_decl.name, "add");
+        assert_eq!(add_decl.kind, DeclKind::Function);
     }
 }

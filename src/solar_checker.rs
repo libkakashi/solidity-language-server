@@ -1,22 +1,33 @@
 use solar::{
+    config::{ImportRemapping, Opts},
     interface::{
         Session, SourceMap, Span,
         diagnostics::{Diag, DiagCtxt, InMemoryEmitter, Level},
     },
     sema::Compiler,
 };
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, NumberOrString, Position, Range};
 
 use crate::utils;
+
+/// Configuration for solar import resolution.
+#[derive(Clone, Default)]
+pub struct SolarConfig {
+    pub remappings: Vec<ImportRemapping>,
+    pub include_paths: Vec<PathBuf>,
+    pub base_path: Option<PathBuf>,
+}
 
 /// Run solar type checking on a saved file, returning LSP diagnostics.
 ///
 /// This is synchronous — designed to run inside `tokio::task::spawn_blocking`.
 /// Wrapped in `catch_unwind` so a solar panic does not crash the LSP.
-pub fn check_file(file_path: &Path) -> Vec<Diagnostic> {
-    let result =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| check_file_inner(file_path)));
+pub fn check_file(file_path: &Path, config: &SolarConfig) -> Vec<Diagnostic> {
+    let config = config.clone();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        check_file_inner(file_path, &config)
+    }));
     match result {
         Ok(diags) => diags,
         Err(_) => {
@@ -26,10 +37,17 @@ pub fn check_file(file_path: &Path) -> Vec<Diagnostic> {
     }
 }
 
-fn check_file_inner(file_path: &Path) -> Vec<Diagnostic> {
+fn check_file_inner(file_path: &Path, config: &SolarConfig) -> Vec<Diagnostic> {
     let (emitter, diag_buffer) = InMemoryEmitter::new();
+    let opts = Opts {
+        import_remappings: config.remappings.clone(),
+        include_paths: config.include_paths.clone(),
+        base_path: config.base_path.clone(),
+        ..Default::default()
+    };
     let sess = Session::builder()
         .dcx(DiagCtxt::new(Box::new(emitter)))
+        .opts(opts)
         .build();
     let mut compiler = Compiler::new(sess);
 

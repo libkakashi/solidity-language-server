@@ -181,3 +181,357 @@ contract Token {
     assert!(text.contains("constant"), "Should show constant modifier");
     assert!(text.contains("total supply"), "Should show NatSpec");
 }
+
+#[test]
+fn hover_on_qualified_event_name() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+interface IFees {
+    event FeeUpdated(uint256 fee);
+}
+contract Pool {
+    function emitFee() public {
+        emit IFees.FeeUpdated(100);
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    // Hover on "FeeUpdated" in "IFees.FeeUpdated" (second occurrence)
+    let pos = source.rfind("FeeUpdated").unwrap();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col));
+    assert!(text.is_some(), "Should show hover for qualified FeeUpdated");
+    let text = text.unwrap();
+    assert!(
+        text.contains("event FeeUpdated"),
+        "Should show event signature, got: {text}"
+    );
+}
+
+#[test]
+fn hover_on_struct_field_via_variable() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Registry {
+    struct User {
+        address wallet;
+        uint256 balance;
+    }
+
+    function test() public {
+        User memory u;
+        address w = u.wallet;
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    // Hover on "wallet" in "u.wallet"
+    let pos = source.find("u.wallet").unwrap() + 2; // skip "u."
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col));
+    assert!(
+        text.is_some(),
+        "Should show hover for struct field via variable"
+    );
+    let text = text.unwrap();
+    assert!(
+        text.contains("address"),
+        "Should show field type, got: {text}"
+    );
+}
+
+#[test]
+fn hover_on_return_parameter() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Vault {
+    function getBalance() public pure returns (uint256 balance) {
+        balance = 42;
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    // Hover on "balance" in "balance = 42;"
+    let pos = source.find("balance = 42").unwrap();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col));
+    assert!(text.is_some(), "Should show hover for return parameter");
+    let text = text.unwrap();
+    assert!(
+        text.contains("uint256"),
+        "Should show return parameter type, got: {text}"
+    );
+}
+
+#[test]
+fn hover_on_enum_value_via_qualified_name() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Foo {
+    enum Status { Active, Paused }
+
+    function bar() public {
+        Status s = Status.Active;
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    // Hover on "Active" in "Status.Active"
+    let pos = source.find("Status.Active").unwrap() + "Status.".len();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col));
+    assert!(
+        text.is_some(),
+        "Should show hover for enum value via qualified name"
+    );
+    let text = text.unwrap();
+    assert!(
+        text.contains("Active"),
+        "Should show enum value name, got: {text}"
+    );
+}
+
+#[test]
+fn hover_on_library_function_via_dot() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+library MathLib {
+    function add(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a + b;
+    }
+}
+
+contract Calculator {
+    function calc() public pure returns (uint256) {
+        return MathLib.add(1, 2);
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    // Hover on "add" in "MathLib.add"
+    let pos = source.find("MathLib.add(1").unwrap() + "MathLib.".len();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col));
+    assert!(
+        text.is_some(),
+        "Should show hover for library function via dot"
+    );
+    let text = text.unwrap();
+    assert!(
+        text.contains("function add"),
+        "Should show function signature, got: {text}"
+    );
+}
+
+#[test]
+fn hover_struct_literal_field_not_local_var() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Foo {
+    struct Point {
+        uint256 x;
+        uint256 y;
+    }
+
+    function test() public {
+        uint256 x = 10;
+        uint256 y = 20;
+        Point memory p = Point({x: x, y: y});
+        uint256 a = p.x;
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    // Hover on the value "x" (the second x in "x: x") should show the local var
+    let struct_call = source.find("Point({x: x").unwrap();
+    let value_x = source[struct_call..].find("x: x").unwrap() + struct_call + "x: ".len();
+    let line = source[..value_x].matches('\n').count() as u32;
+    let col = (value_x - source[..value_x].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col));
+    assert!(text.is_some(), "Should hover on value x in struct literal");
+    let text = text.unwrap();
+    assert!(
+        text.contains("uint256"),
+        "Value x should show local var type, got: {text}"
+    );
+
+    // Hover on the field name "x" (the first x in "x: x") should NOT resolve
+    // to the local variable — currently it shows nothing, which is correct
+    // (better than showing wrong info from the local var).
+    let field_x = source[struct_call..].find("x: x").unwrap() + struct_call;
+    let line2 = source[..field_x].matches('\n').count() as u32;
+    let col2 = (field_x - source[..field_x].rfind('\n').unwrap() - 1) as u32;
+
+    let text2 = hover_text(source, &st, &path, Position::new(line2, col2));
+    // Field name should NOT resolve to the local variable (uint256 x = 10)
+    if let Some(ref t) = text2 {
+        assert!(
+            !t.contains("uint256") || t.contains("struct"),
+            "Struct field name should not show local var type, got: {t}"
+        );
+    }
+}
+
+#[test]
+fn hover_on_inherited_modifier() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Ownable {
+    modifier onlyOwner() {
+        _;
+    }
+}
+
+contract MyContract is Ownable {
+    function withdraw() public onlyOwner {
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    // Hover on "onlyOwner" in "function withdraw() public onlyOwner"
+    let pos = source.find("public onlyOwner").unwrap() + "public ".len();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col));
+    assert!(text.is_some(), "Should show hover for inherited modifier");
+    let text = text.unwrap();
+    assert!(
+        text.contains("modifier onlyOwner"),
+        "Should show modifier signature, got: {text}"
+    );
+}
+
+#[test]
+fn hover_on_imported_inherited_modifier() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut parser = TsParser::new();
+    let resolver = ImportResolver::with_root(tmp.path().to_path_buf());
+
+    let ownable_source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Ownable {
+    modifier onlyOwner() {
+        _;
+    }
+}
+"#;
+    let ownable_path = tmp.path().join("Ownable.sol");
+    std::fs::write(&ownable_path, ownable_source).unwrap();
+
+    let main_source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+import {Ownable} from "./Ownable.sol";
+
+contract MyContract is Ownable {
+    function withdraw() public onlyOwner {
+    }
+}
+"#;
+    let main_path = tmp.path().join("MyContract.sol");
+    std::fs::write(&main_path, main_source).unwrap();
+
+    let mut st = SymbolTable::new(resolver);
+    st.index_file(&ownable_path, ownable_source, &mut parser);
+    st.resolve_file_references(&ownable_path, &mut parser);
+    st.index_file(&main_path, main_source, &mut parser);
+    st.resolve_file_references(&main_path, &mut parser);
+
+    // Hover on "onlyOwner" in "function withdraw() public onlyOwner"
+    let pos = main_source.find("public onlyOwner").unwrap() + "public ".len();
+    let line = main_source[..pos].matches('\n').count() as u32;
+    let col = (pos - main_source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(main_source, &st, &main_path, Position::new(line, col));
+    assert!(
+        text.is_some(),
+        "Should show hover for imported inherited modifier"
+    );
+    let text = text.unwrap();
+    assert!(
+        text.contains("modifier onlyOwner"),
+        "Should show modifier signature, got: {text}"
+    );
+}
+
+#[test]
+fn hover_on_imported_contract_function() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut parser = TsParser::new();
+    let resolver = ImportResolver::with_root(tmp.path().to_path_buf());
+
+    let lib_source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+library MathLib {
+    function add(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a + b;
+    }
+}
+"#;
+    let lib_path = tmp.path().join("MathLib.sol");
+    std::fs::write(&lib_path, lib_source).unwrap();
+
+    let main_source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+import {MathLib} from "./MathLib.sol";
+
+contract Calculator {
+    function calc() public pure returns (uint256) {
+        return MathLib.add(1, 2);
+    }
+}
+"#;
+    let main_path = tmp.path().join("Calculator.sol");
+    std::fs::write(&main_path, main_source).unwrap();
+
+    let mut st = SymbolTable::new(resolver);
+    st.index_file(&lib_path, lib_source, &mut parser);
+    st.resolve_file_references(&lib_path, &mut parser);
+    st.index_file(&main_path, main_source, &mut parser);
+    st.resolve_file_references(&main_path, &mut parser);
+
+    // Hover on "add" in "MathLib.add"
+    let pos = main_source.find("MathLib.add(1").unwrap() + "MathLib.".len();
+    let line = main_source[..pos].matches('\n').count() as u32;
+    let col = (pos - main_source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(main_source, &st, &main_path, Position::new(line, col));
+    assert!(
+        text.is_some(),
+        "Should show hover for imported library function"
+    );
+    let text = text.unwrap();
+    assert!(
+        text.contains("function add"),
+        "Should show function signature, got: {text}"
+    );
+}

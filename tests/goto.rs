@@ -150,3 +150,98 @@ contract Foo {
         "Should resolve even on the declaration itself"
     );
 }
+
+#[test]
+fn goto_qualified_event_definition() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+interface IFees {
+    event FeeUpdated(uint256 fee);
+}
+contract Pool {
+    function emitFee() public {
+        emit IFees.FeeUpdated(100);
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    // Position on "FeeUpdated" in "IFees.FeeUpdated"
+    let pos = source.rfind("FeeUpdated").unwrap();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let loc = goto_definition(&st, &path, source, Position::new(line, col));
+    assert!(
+        loc.is_some(),
+        "Should resolve FeeUpdated to its declaration in IFees"
+    );
+    let loc = loc.unwrap();
+    // FeeUpdated is declared on line 4 (inside interface IFees)
+    assert_eq!(loc.range.start.line, 4);
+}
+
+#[test]
+fn goto_struct_field_from_member_access() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Foo {
+    struct Point {
+        uint256 x;
+        uint256 y;
+    }
+
+    function bar() public {
+        Point memory p;
+        uint256 val = p.x;
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    // Position on "x" in "p.x"
+    let pos = source.find("p.x").unwrap() + 2; // skip "p."
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let loc = goto_definition(&st, &path, source, Position::new(line, col));
+    assert!(
+        loc.is_some(),
+        "Should resolve x to struct field declaration"
+    );
+    let loc = loc.unwrap();
+    // "uint256 x;" is on line 5
+    assert_eq!(loc.range.start.line, 5);
+}
+
+#[test]
+fn goto_enum_value_from_qualified_access() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Foo {
+    enum Status { Active, Paused }
+
+    function bar() public {
+        Status s = Status.Active;
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    // Position on "Active" in "Status.Active"
+    let pos = source.find("Status.Active").unwrap() + "Status.".len();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let loc = goto_definition(&st, &path, source, Position::new(line, col));
+    assert!(
+        loc.is_some(),
+        "Should resolve Active to its enum value declaration"
+    );
+    let loc = loc.unwrap();
+    // enum Status { Active, ... } is on line 4
+    assert_eq!(loc.range.start.line, 4);
+}

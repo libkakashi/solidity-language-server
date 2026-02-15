@@ -412,3 +412,91 @@ contract Vault {
     // 1 declaration + 1 return type + 1 constructor call + 1 param type = 4
     assert_eq!(refs.len(), 4, "Expected 4 references, got {:?}", refs);
 }
+
+#[test]
+fn find_references_to_event_via_qualified_name() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+interface IFees {
+    event FeeUpdated(uint256 fee);
+}
+contract Pool {
+    function emitFee() public {
+        emit IFees.FeeUpdated(100);
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    // Position on "FeeUpdated" declaration inside IFees
+    let pos = first_position(source, "FeeUpdated");
+    let refs = find_references(&st, &path, source, pos, true);
+    // 1 declaration + 1 qualified usage in emit = 2
+    assert_eq!(
+        refs.len(),
+        2,
+        "Expected 2 references for FeeUpdated (decl + qualified usage), got {:?}",
+        refs
+    );
+}
+
+#[test]
+fn find_references_to_struct_field_via_member_access() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Foo {
+    struct Point {
+        uint256 x;
+        uint256 y;
+    }
+
+    function bar() public {
+        Point memory p;
+        uint256 a = p.x;
+        uint256 b = p.x;
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    // Position on "x" in struct declaration
+    let pos = first_position(source, "x;");
+    let refs = find_references(&st, &path, source, pos, true);
+    // 1 declaration + 2 member accesses = 3
+    assert_eq!(
+        refs.len(),
+        3,
+        "Expected 3 references for struct field x, got {:?}",
+        refs
+    );
+}
+
+#[test]
+fn find_references_to_enum_value_via_qualified_access() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Foo {
+    enum Status { Active, Paused }
+
+    function bar() public {
+        Status s = Status.Active;
+        Status t = Status.Active;
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    // Position on first "Active" (the declaration inside enum)
+    let pos = first_position(source, "Active");
+    let refs = find_references(&st, &path, source, pos, true);
+    // 1 declaration + 2 qualified usages = 3
+    assert_eq!(
+        refs.len(),
+        3,
+        "Expected 3 references for Active, got {:?}",
+        refs
+    );
+}
