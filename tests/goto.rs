@@ -245,3 +245,485 @@ contract Foo {
     // enum Status { Active, ... } is on line 4
     assert_eq!(loc.range.start.line, 4);
 }
+
+// ---------------------------------------------------------------------------
+// Edge case tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn goto_function_call_to_definition() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Calculator {
+    function add(uint256 a, uint256 b) public pure returns (uint256) {
+        return a + b;
+    }
+
+    function compute() public pure returns (uint256) {
+        return add(1, 2);
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    // Position on `add` in `add(1, 2)`
+    let pos = source.find("add(1, 2)").unwrap();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let loc = goto_definition(&st, &path, source, Position::new(line, col));
+    assert!(loc.is_some(), "Should resolve function call to definition");
+    let loc = loc.unwrap();
+    // function add(...) is declared on line 4
+    assert_eq!(loc.range.start.line, 4);
+}
+
+#[test]
+fn goto_event_emit_to_definition() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Token {
+    event Transfer(address indexed from, address indexed to, uint256 amount);
+
+    function send(address to, uint256 amount) public {
+        emit Transfer(msg.sender, to, amount);
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    // Position on `Transfer` in `emit Transfer(...)`
+    let pos = source.find("emit Transfer").unwrap() + "emit ".len();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let loc = goto_definition(&st, &path, source, Position::new(line, col));
+    assert!(
+        loc.is_some(),
+        "Should resolve event emit to event definition"
+    );
+    let loc = loc.unwrap();
+    // event Transfer is declared on line 4
+    assert_eq!(loc.range.start.line, 4);
+}
+
+#[test]
+fn goto_error_revert_to_definition() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Token {
+    error InsufficientBalance(uint256 available, uint256 required);
+
+    function transfer(uint256 amount) public {
+        revert InsufficientBalance(0, amount);
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    // Position on `InsufficientBalance` in `revert InsufficientBalance(...)`
+    let pos = source.find("revert InsufficientBalance").unwrap() + "revert ".len();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let loc = goto_definition(&st, &path, source, Position::new(line, col));
+    assert!(
+        loc.is_some(),
+        "Should resolve error revert to error definition"
+    );
+    let loc = loc.unwrap();
+    // error InsufficientBalance is declared on line 4
+    assert_eq!(loc.range.start.line, 4);
+}
+
+#[test]
+fn goto_modifier_usage_to_definition() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Access {
+    modifier onlyOwner() {
+        _;
+    }
+
+    function withdraw() public onlyOwner {
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    // Position on `onlyOwner` in `function withdraw() public onlyOwner`
+    let pos = source.find("public onlyOwner").unwrap() + "public ".len();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let loc = goto_definition(&st, &path, source, Position::new(line, col));
+    assert!(loc.is_some(), "Should resolve modifier usage to definition");
+    let loc = loc.unwrap();
+    // modifier onlyOwner is declared on line 4
+    assert_eq!(loc.range.start.line, 4);
+}
+
+#[test]
+fn goto_inherited_function_call_to_base() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Base {
+    function baseFunc() public pure returns (uint256) {
+        return 42;
+    }
+}
+
+contract Child is Base {
+    function test() public pure returns (uint256) {
+        return baseFunc();
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    // Position on `baseFunc` in `return baseFunc();`
+    let pos = source.find("baseFunc();").unwrap();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let loc = goto_definition(&st, &path, source, Position::new(line, col));
+    assert!(
+        loc.is_some(),
+        "Should resolve inherited function call to base contract"
+    );
+    let loc = loc.unwrap();
+    // function baseFunc() in Base is on line 4
+    assert_eq!(loc.range.start.line, 4);
+}
+
+#[test]
+fn goto_type_in_mapping_to_struct() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Registry {
+    struct User {
+        address wallet;
+        uint256 balance;
+    }
+
+    mapping(address => User) public users;
+}
+"#;
+    let (st, path) = setup(source);
+
+    // Position on `User` in `mapping(address => User)`
+    let pos = source.find("=> User)").unwrap() + "=> ".len();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let loc = goto_definition(&st, &path, source, Position::new(line, col));
+    assert!(
+        loc.is_some(),
+        "Should resolve type in mapping to struct definition"
+    );
+    let loc = loc.unwrap();
+    // struct User is declared on line 4
+    assert_eq!(loc.range.start.line, 4);
+}
+
+#[test]
+fn goto_constructor_call_new_to_contract() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Token {
+    uint256 public supply;
+}
+
+contract Factory {
+    function create() public returns (Token) {
+        Token t = new Token();
+        return t;
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    // Position on `Token` in `new Token()` (the type reference after `new`)
+    let pos = source.find("new Token()").unwrap() + "new ".len();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let loc = goto_definition(&st, &path, source, Position::new(line, col));
+    assert!(
+        loc.is_some(),
+        "Should resolve constructor call to contract definition"
+    );
+    let loc = loc.unwrap();
+    // contract Token is declared on line 3
+    assert_eq!(loc.range.start.line, 3);
+}
+
+#[test]
+fn goto_for_loop_variable_to_declaration() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Iter {
+    function loop_test() public pure returns (uint256) {
+        uint256 sum = 0;
+        for (uint256 idx = 0; idx < 10; idx++) {
+            sum += idx;
+        }
+        return sum;
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    // Position on `idx` in `sum += idx;`
+    let pos = source.find("sum += idx").unwrap() + "sum += ".len();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let loc = goto_definition(&st, &path, source, Position::new(line, col));
+    assert!(
+        loc.is_some(),
+        "Should resolve for-loop variable to its declaration"
+    );
+    let loc = loc.unwrap();
+    // `uint256 idx = 0` is on line 6
+    assert_eq!(loc.range.start.line, 6);
+}
+
+#[test]
+fn goto_on_whitespace_returns_none() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Empty {
+    uint256 public x;
+}
+"#;
+    let (st, path) = setup(source);
+
+    // Position on an empty line (line 2 is blank)
+    let loc = goto_definition(&st, &path, source, Position::new(2, 0));
+    assert!(loc.is_none(), "Goto on whitespace should return None");
+}
+
+#[test]
+fn goto_library_qualified_function_call() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+library MathLib {
+    function add(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a + b;
+    }
+}
+
+contract Calculator {
+    function compute() public pure returns (uint256) {
+        return MathLib.add(1, 2);
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    // Position on `add` in `MathLib.add(1, 2)`
+    let pos = source.find("MathLib.add(1").unwrap() + "MathLib.".len();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let loc = goto_definition(&st, &path, source, Position::new(line, col));
+    assert!(
+        loc.is_some(),
+        "Should resolve library qualified function call"
+    );
+    let loc = loc.unwrap();
+    // function add in MathLib is on line 4
+    assert_eq!(loc.range.start.line, 4);
+}
+
+#[test]
+fn goto_base_contract_name_in_inheritance() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Base {
+    uint256 public x;
+}
+
+contract Child is Base {
+    function test() public view returns (uint256) {
+        return x;
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    // Position on `Base` in `contract Child is Base`
+    let pos = source.find("is Base").unwrap() + "is ".len();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let loc = goto_definition(&st, &path, source, Position::new(line, col));
+    assert!(
+        loc.is_some(),
+        "Should resolve base contract name in inheritance"
+    );
+    let loc = loc.unwrap();
+    // contract Base is declared on line 3
+    assert_eq!(loc.range.start.line, 3);
+}
+
+#[test]
+fn goto_return_type_to_struct() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Registry {
+    struct Info {
+        address owner;
+        uint256 value;
+    }
+
+    function getInfo() public pure returns (Info memory) {
+        Info memory info;
+        return info;
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    // Position on `Info` in `returns (Info memory)`
+    let pos = source.find("returns (Info").unwrap() + "returns (".len();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let loc = goto_definition(&st, &path, source, Position::new(line, col));
+    assert!(
+        loc.is_some(),
+        "Should resolve return type to struct definition"
+    );
+    let loc = loc.unwrap();
+    // struct Info is declared on line 4
+    assert_eq!(loc.range.start.line, 4);
+}
+
+#[test]
+fn goto_cross_file_imported_struct_field() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut parser = TsParser::new();
+    let resolver = ImportResolver::with_root(tmp.path().to_path_buf());
+
+    let types_source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+struct Order {
+    uint256 id;
+    address buyer;
+    uint256 price;
+}
+"#;
+    let types_path = tmp.path().join("Types.sol");
+    std::fs::write(&types_path, types_source).unwrap();
+
+    let main_source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+import {Order} from "./Types.sol";
+
+contract Exchange {
+    function test() public pure {
+        Order memory o;
+        address b = o.buyer;
+    }
+}
+"#;
+    let main_path = tmp.path().join("Exchange.sol");
+    std::fs::write(&main_path, main_source).unwrap();
+
+    let mut st = SymbolTable::new(resolver);
+    st.index_file(&types_path, types_source, &mut parser);
+    st.resolve_file_references(&types_path, &mut parser);
+    st.index_file(&main_path, main_source, &mut parser);
+    st.resolve_file_references(&main_path, &mut parser);
+
+    // Position on `buyer` in `o.buyer`
+    let pos = main_source.find("o.buyer").unwrap() + "o.".len();
+    let line = main_source[..pos].matches('\n').count() as u32;
+    let col = (pos - main_source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let loc = goto_definition(&st, &main_path, main_source, Position::new(line, col));
+    assert!(
+        loc.is_some(),
+        "Should resolve cross-file struct field access"
+    );
+    let loc = loc.unwrap();
+    // `address buyer;` is on line 5 in Types.sol
+    assert_eq!(loc.range.start.line, 5);
+}
+
+#[test]
+fn goto_enum_value_to_enum_definition() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Game {
+    enum Status { Active, Paused, Ended }
+
+    function start() public pure returns (Status) {
+        return Status.Active;
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    // Position on `Active` in `Status.Active`
+    let pos = source.find("return Status.Active").unwrap() + "return Status.".len();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let loc = goto_definition(&st, &path, source, Position::new(line, col));
+    assert!(
+        loc.is_some(),
+        "Should resolve enum value to enum definition"
+    );
+    let loc = loc.unwrap();
+    // enum Status { Active, ... } is on line 4
+    assert_eq!(loc.range.start.line, 4);
+}
+
+#[test]
+fn goto_parameter_type_to_contract() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Token {
+    uint256 public supply;
+}
+
+contract Exchange {
+    function deposit(Token token) public {
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    // Position on `Token` in `function deposit(Token token)`
+    let pos = source.find("deposit(Token").unwrap() + "deposit(".len();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let loc = goto_definition(&st, &path, source, Position::new(line, col));
+    assert!(
+        loc.is_some(),
+        "Should resolve parameter type to contract definition"
+    );
+    let loc = loc.unwrap();
+    // contract Token is declared on line 3
+    assert_eq!(loc.range.start.line, 3);
+}

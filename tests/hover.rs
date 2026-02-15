@@ -343,6 +343,644 @@ contract Calculator {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Edge case tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn hover_on_constructor() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Token {
+    address public owner;
+
+    constructor(address _owner) {
+        owner = _owner;
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    // Hover on `constructor` keyword
+    let pos = source.find("constructor(address").unwrap();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col));
+    assert!(text.is_some(), "Should show hover for constructor");
+    let text = text.unwrap();
+    assert!(
+        text.contains("constructor("),
+        "Should show constructor signature, got: {text}"
+    );
+    assert!(
+        text.contains("address"),
+        "Should show parameter type, got: {text}"
+    );
+}
+
+#[test]
+fn hover_on_fallback_function() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Proxy {
+    fallback() external payable {}
+}
+"#;
+    let (st, path) = setup(source);
+
+    let pos = source.find("fallback()").unwrap();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col));
+    assert!(text.is_some(), "Should show hover for fallback");
+    let text = text.unwrap();
+    assert!(
+        text.contains("fallback"),
+        "Should show fallback signature, got: {text}"
+    );
+}
+
+#[test]
+fn hover_on_receive_function() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Vault {
+    receive() external payable {}
+}
+"#;
+    let (st, path) = setup(source);
+
+    let pos = source.find("receive()").unwrap();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col));
+    assert!(text.is_some(), "Should show hover for receive");
+    let text = text.unwrap();
+    assert!(
+        text.contains("receive()"),
+        "Should show receive signature, got: {text}"
+    );
+    assert!(
+        text.contains("payable"),
+        "Should show payable keyword, got: {text}"
+    );
+}
+
+#[test]
+fn hover_on_modifier_declaration() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Access {
+    modifier onlyAdmin(address caller) {
+        _;
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    let pos = source.find("onlyAdmin").unwrap();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col));
+    assert!(text.is_some(), "Should show hover for modifier");
+    let text = text.unwrap();
+    assert!(
+        text.contains("modifier onlyAdmin"),
+        "Should show modifier signature, got: {text}"
+    );
+    assert!(
+        text.contains("address caller"),
+        "Should show modifier parameters, got: {text}"
+    );
+}
+
+#[test]
+fn hover_on_event_declaration() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Token {
+    /// @notice Emitted when tokens are transferred
+    event Transfer(address indexed from, address indexed to, uint256 amount);
+}
+"#;
+    let (st, path) = setup(source);
+
+    let pos = source.find("Transfer").unwrap();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col));
+    assert!(text.is_some(), "Should show hover for event");
+    let text = text.unwrap();
+    assert!(
+        text.contains("event Transfer"),
+        "Should show event signature, got: {text}"
+    );
+}
+
+#[test]
+fn hover_on_error_definition() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Token {
+    error InsufficientBalance(uint256 available, uint256 required);
+
+    function transfer(uint256 amount) public {
+        revert InsufficientBalance(0, amount);
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    // Hover on error usage in revert
+    let pos = source.find("revert InsufficientBalance").unwrap() + "revert ".len();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col));
+    assert!(text.is_some(), "Should show hover for error usage");
+    let text = text.unwrap();
+    assert!(
+        text.contains("error InsufficientBalance"),
+        "Should show error signature, got: {text}"
+    );
+    assert!(
+        text.contains("uint256 available"),
+        "Should show error params, got: {text}"
+    );
+}
+
+#[test]
+fn hover_on_enum_value_qualified() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Game {
+    enum Status { Active, Paused, Ended }
+
+    function start() public pure returns (Status) {
+        return Status.Active;
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    // Hover on "Active" in "Status.Active" inside return statement
+    let pos = source.find("return Status.Active").unwrap() + "return Status.".len();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col));
+    assert!(text.is_some(), "Should show hover for enum value Active");
+    let text = text.unwrap();
+    assert!(
+        text.contains("Active"),
+        "Should show enum value name, got: {text}"
+    );
+}
+
+#[test]
+fn hover_on_loop_variable() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Iter {
+    function loop_test() public pure {
+        for (uint256 i = 0; i < 10; i++) {
+            uint256 x = i;
+        }
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    // Hover on `i` in `uint256 x = i;`
+    let pos = source.find("uint256 x = i").unwrap() + "uint256 x = ".len();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col));
+    assert!(text.is_some(), "Should show hover for loop variable i");
+    let text = text.unwrap();
+    assert!(
+        text.contains("uint256"),
+        "Should show loop variable type, got: {text}"
+    );
+}
+
+#[test]
+fn hover_on_mapping_variable() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Ledger {
+    mapping(address => uint256) public balances;
+}
+"#;
+    let (st, path) = setup(source);
+
+    let pos = source.find("balances").unwrap();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col));
+    assert!(text.is_some(), "Should show hover for mapping variable");
+    let text = text.unwrap();
+    assert!(
+        text.contains("mapping"),
+        "Should show mapping type, got: {text}"
+    );
+    assert!(
+        text.contains("balances"),
+        "Should show variable name, got: {text}"
+    );
+}
+
+#[test]
+fn hover_on_array_variable() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Store {
+    uint256[] public items;
+}
+"#;
+    let (st, path) = setup(source);
+
+    let pos = source.find("items").unwrap();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col));
+    assert!(text.is_some(), "Should show hover for array variable");
+    let text = text.unwrap();
+    assert!(
+        text.contains("uint256[]"),
+        "Should show array type, got: {text}"
+    );
+}
+
+#[test]
+fn hover_on_immutable_variable() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Token {
+    address public immutable deployer;
+
+    constructor() {
+        deployer = msg.sender;
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    let pos = source.find("deployer").unwrap();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col));
+    assert!(text.is_some(), "Should show hover for immutable variable");
+    let text = text.unwrap();
+    assert!(
+        text.contains("immutable"),
+        "Should show immutable modifier, got: {text}"
+    );
+    assert!(text.contains("address"), "Should show type, got: {text}");
+}
+
+#[test]
+fn hover_on_function_with_multiple_returns() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Multi {
+    function getInfo() public pure returns (uint256 id, address owner, bool active) {
+        return (1, address(0), true);
+    }
+
+    function test() public pure {
+        getInfo();
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    // Hover on `getInfo` in the call
+    let pos = source.find("getInfo();").unwrap();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col));
+    assert!(
+        text.is_some(),
+        "Should show hover for multi-return function"
+    );
+    let text = text.unwrap();
+    assert!(
+        text.contains("function getInfo"),
+        "Should show function name, got: {text}"
+    );
+    assert!(
+        text.contains("returns"),
+        "Should show returns keyword, got: {text}"
+    );
+    assert!(
+        text.contains("uint256 id"),
+        "Should show first return param, got: {text}"
+    );
+    assert!(
+        text.contains("bool active"),
+        "Should show last return param, got: {text}"
+    );
+}
+
+#[test]
+fn hover_on_interface_function() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+interface IERC20 {
+    function totalSupply() external view returns (uint256);
+    function balanceOf(address account) external view returns (uint256);
+}
+"#;
+    let (st, path) = setup(source);
+
+    let pos = source.find("balanceOf").unwrap();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col));
+    assert!(text.is_some(), "Should show hover for interface function");
+    let text = text.unwrap();
+    assert!(
+        text.contains("function balanceOf"),
+        "Should show function signature, got: {text}"
+    );
+    assert!(
+        text.contains("address account"),
+        "Should show parameter, got: {text}"
+    );
+    assert!(
+        text.contains("view"),
+        "Should show state mutability, got: {text}"
+    );
+}
+
+#[test]
+fn hover_on_inherited_state_variable() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Base {
+    uint256 public value;
+}
+
+contract Child is Base {
+    function getValue() public view returns (uint256) {
+        return value;
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    // Hover on `value` in `return value;`
+    let pos = source.find("return value").unwrap() + "return ".len();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col));
+    assert!(
+        text.is_some(),
+        "Should show hover for inherited state variable"
+    );
+    let text = text.unwrap();
+    assert!(
+        text.contains("uint256"),
+        "Should show inherited variable type, got: {text}"
+    );
+    assert!(
+        text.contains("value"),
+        "Should show inherited variable name, got: {text}"
+    );
+}
+
+#[test]
+fn hover_on_whitespace_returns_none() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Empty {
+    uint256 public x;
+}
+"#;
+    let (st, path) = setup(source);
+
+    // Position on an empty line (line 2 is blank)
+    let text = hover_text(source, &st, &path, Position::new(2, 0));
+    assert!(text.is_none(), "Hover on whitespace should return None");
+}
+
+#[test]
+fn hover_on_comment_returns_none() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+// This is a comment
+contract Foo {
+    uint256 public x;
+}
+"#;
+    let (st, path) = setup(source);
+
+    // Position on the comment line (line 3: "// This is a comment")
+    let text = hover_text(source, &st, &path, Position::new(3, 5));
+    assert!(text.is_none(), "Hover on comment should return None");
+}
+
+#[test]
+fn hover_on_free_function() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+function freeAdd(uint256 a, uint256 b) pure returns (uint256) {
+    return a + b;
+}
+
+contract Calc {
+    function compute() public pure returns (uint256) {
+        return freeAdd(1, 2);
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    // Hover on `freeAdd` in `return freeAdd(1, 2);`
+    let pos = source.find("freeAdd(1, 2)").unwrap();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col));
+    assert!(text.is_some(), "Should show hover for free function");
+    let text = text.unwrap();
+    assert!(
+        text.contains("function freeAdd"),
+        "Should show free function signature, got: {text}"
+    );
+    assert!(
+        text.contains("uint256 a"),
+        "Should show parameter, got: {text}"
+    );
+}
+
+#[test]
+fn hover_on_struct_field_declaration() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Registry {
+    struct Record {
+        bytes32 id;
+        address owner;
+        uint256 timestamp;
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    // Hover on "owner" field in the struct declaration
+    let pos = source.find("address owner").unwrap() + "address ".len();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col));
+    assert!(
+        text.is_some(),
+        "Should show hover for struct field declaration"
+    );
+    let text = text.unwrap();
+    assert!(
+        text.contains("address"),
+        "Should show struct field type, got: {text}"
+    );
+    assert!(
+        text.contains("owner"),
+        "Should show struct field name, got: {text}"
+    );
+}
+
+#[test]
+fn hover_on_library_function_qualified_access() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+library SafeMath {
+    function mul(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a * b;
+    }
+}
+
+contract Calculator {
+    function compute() public pure returns (uint256) {
+        return SafeMath.mul(3, 4);
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    // Hover on "mul" in "SafeMath.mul"
+    let pos = source.find("SafeMath.mul(3").unwrap() + "SafeMath.".len();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col));
+    assert!(
+        text.is_some(),
+        "Should show hover for library qualified function"
+    );
+    let text = text.unwrap();
+    assert!(
+        text.contains("function mul"),
+        "Should show function signature, got: {text}"
+    );
+    assert!(
+        text.contains("uint256 a"),
+        "Should show parameter, got: {text}"
+    );
+}
+
+#[test]
+fn hover_on_cross_file_imported_struct() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut parser = TsParser::new();
+    let resolver = ImportResolver::with_root(tmp.path().to_path_buf());
+
+    let types_source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+struct Order {
+    uint256 id;
+    address buyer;
+    uint256 price;
+}
+"#;
+    let types_path = tmp.path().join("Types.sol");
+    std::fs::write(&types_path, types_source).unwrap();
+
+    let main_source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+import {Order} from "./Types.sol";
+
+contract Exchange {
+    function test() public pure {
+        Order memory o;
+        address b = o.buyer;
+    }
+}
+"#;
+    let main_path = tmp.path().join("Exchange.sol");
+    std::fs::write(&main_path, main_source).unwrap();
+
+    let mut st = SymbolTable::new(resolver);
+    st.index_file(&types_path, types_source, &mut parser);
+    st.resolve_file_references(&types_path, &mut parser);
+    st.index_file(&main_path, main_source, &mut parser);
+    st.resolve_file_references(&main_path, &mut parser);
+
+    // Hover on `buyer` in `o.buyer` -- resolves to the struct field from
+    // the cross-file imported struct.
+    let pos = main_source.find("o.buyer").unwrap() + "o.".len();
+    let line = main_source[..pos].matches('\n').count() as u32;
+    let col = (pos - main_source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(main_source, &st, &main_path, Position::new(line, col));
+    assert!(
+        text.is_some(),
+        "Should show hover for cross-file struct field"
+    );
+    let text = text.unwrap();
+    assert!(
+        text.contains("address"),
+        "Should show field type from cross-file struct, got: {text}"
+    );
+    assert!(
+        text.contains("buyer"),
+        "Should show field name, got: {text}"
+    );
+}
+
 #[test]
 fn hover_struct_literal_field_not_local_var() {
     let source = r#"// SPDX-License-Identifier: MIT

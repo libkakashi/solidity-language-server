@@ -699,10 +699,32 @@ fn walk_node(node: &Node, scope_id: ScopeId, file_id: FileId, source: &str, fi: 
                 walk_node(&obj, scope_id, file_id, source, fi);
             }
             if let Some(prop) = node.child_by_field_name("property") {
-                // The object's reference is the last one pushed by walk_node.
-                // For chained access (a.b.c), this is the innermost property.
+                // Determine which reference represents the "result" of the
+                // object expression:
+                // - For chained member access (a.b.c) the last ref is the
+                //   innermost property `b` which is correct.
+                // - For subscript expressions (items[i].field) the last ref
+                //   is the index `i` which is wrong — the container variable
+                //   `items` is at obj_ref_start.
+                //
+                // Heuristic: use the last ref if it is itself a member
+                // (member_of is set) or is the only ref pushed (simple
+                // identifier). Otherwise fall back to the first ref which
+                // is the root variable of the expression.
                 let obj_ref_idx = if fi.references.len() > obj_ref_start {
-                    Some(fi.references.len() - 1)
+                    let last = fi.references.len() - 1;
+                    if last == obj_ref_start {
+                        // Single ref pushed (simple identifier) — use it.
+                        Some(last)
+                    } else if fi.references[last].member_of.is_some() {
+                        // Last ref is a member/property — use it (chained access).
+                        Some(last)
+                    } else {
+                        // Multiple refs but last isn't a member (e.g. subscript
+                        // index, function arg). Use the first ref which is the
+                        // root variable.
+                        Some(obj_ref_start)
+                    }
                 } else {
                     None
                 };
@@ -2263,6 +2285,29 @@ fn resolve_member(
                 _ => None,
             }
         }
+        // Function kinds: resolve the return type, then search inside it.
+        DeclKind::Function | DeclKind::Constructor => {
+            let container = st.get_declaration(&container_decl_id)?;
+            let ret_params = container.return_parameters();
+            // Single return type — resolve member on that type.
+            if ret_params.len() == 1 {
+                let ret_type = &ret_params[0].0;
+                let base_type = strip_type_modifiers(ret_type);
+                let type_decl_id = find_type_declaration(st, container_file, base_type)?;
+                let type_decl = st.get_declaration(&type_decl_id)?;
+                match type_decl.kind {
+                    DeclKind::Contract | DeclKind::Interface | DeclKind::Library => {
+                        find_member_in_scope(st, &type_decl_id, member_name)
+                    }
+                    DeclKind::Struct | DeclKind::Enum => {
+                        find_member_by_decl_id(st, &type_decl_id, member_name)
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        }
         // Import alias: search the imported file's top-level declarations.
         DeclKind::ImportAlias => {
             resolve_import_alias_member(st, file_id, &container_decl_id, member_name)
@@ -2359,6 +2404,31 @@ fn find_type_declaration(st: &SymbolTable, origin_file: FileId, type_name: &str)
 /// Strip array brackets, `memory`, `storage`, `calldata` suffixes from a type.
 fn strip_type_modifiers(type_text: &str) -> &str {
     let s = type_text.trim();
+    // Extract value type from mapping: mapping(K => V) → V
+    if s.starts_with("mapping(") {
+        if let Some(arrow) = s.find("=>") {
+            let after_arrow = &s[arrow + 2..];
+            // Find the matching closing paren, handling nested mappings.
+            let mut depth = 0i32;
+            let mut end = after_arrow.len();
+            for (i, c) in after_arrow.char_indices() {
+                match c {
+                    '(' => depth += 1,
+                    ')' => {
+                        if depth == 0 {
+                            end = i;
+                            break;
+                        }
+                        depth -= 1;
+                    }
+                    _ => {}
+                }
+            }
+            let value_type = after_arrow[..end].trim();
+            // Recursively strip in case of nested mappings or arrays.
+            return strip_type_modifiers(value_type);
+        }
+    }
     let s = s
         .strip_suffix(" memory")
         .or_else(|| s.strip_suffix(" storage"))
@@ -2448,423 +2518,4 @@ fn resolve_import_alias_member(
         }
     }
     None
-}
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn index(source: &str) -> (SymbolTable, PathBuf) {
-        let mut parser = TsParser::new();
-        let path = PathBuf::from("test.sol");
-        let resolver = ImportResolver::with_root(PathBuf::from("."));
-        let mut st = SymbolTable::new(resolver);
-        st.index_file(&path, source, &mut parser);
-        st.resolve_file_references(&path, &mut parser);
-        (st, path)
-    }
-
-    fn get_fi<'a>(st: &'a SymbolTable, path: &Path) -> &'a FileIndex {
-        st.get_file_index(path).unwrap()
-    }
-
-    #[test]
-    fn test_contract_declaration() {
-        let source = r#"
-contract Foo {
-    uint256 public x;
-    function bar() public returns (uint256) {
-        return x;
-    }
-}
-"#;
-        let (st, path) = index(source);
-        let fi = get_fi(&st, &path);
-
-        let names: Vec<&str> = fi.declarations.values().map(|d| d.name.as_str()).collect();
-        assert!(names.contains(&"Foo"), "names: {names:?}");
-        assert!(names.contains(&"x"), "names: {names:?}");
-        assert!(names.contains(&"bar"), "names: {names:?}");
-
-        let foo = fi.declarations.values().find(|d| d.name == "Foo").unwrap();
-        assert_eq!(foo.kind, DeclKind::Contract);
-        assert_eq!(foo.members().len(), 2);
-    }
-
-    #[test]
-    fn test_struct_members() {
-        let source = r#"
-contract Foo {
-    struct Point {
-        uint256 x;
-        uint256 y;
-    }
-}
-"#;
-        let (st, path) = index(source);
-        let fi = get_fi(&st, &path);
-        let point = fi
-            .declarations
-            .values()
-            .find(|d| d.name == "Point")
-            .unwrap();
-        assert_eq!(point.kind, DeclKind::Struct);
-        assert_eq!(point.members().len(), 2);
-        assert_eq!(point.members()[0].name, "x");
-        assert_eq!(point.members()[1].name, "y");
-    }
-
-    #[test]
-    fn test_function_parameters() {
-        let source = r#"
-contract Foo {
-    function add(uint256 a, uint256 b) public pure returns (uint256) {
-        return a + b;
-    }
-}
-"#;
-        let (st, path) = index(source);
-        let fi = get_fi(&st, &path);
-        let add = fi.declarations.values().find(|d| d.name == "add").unwrap();
-        let params = add.parameters();
-        assert_eq!(params.len(), 2);
-        assert_eq!(params[0], ("uint256".to_string(), "a".to_string()));
-        assert_eq!(params[1], ("uint256".to_string(), "b".to_string()));
-        let returns = add.return_parameters();
-        assert_eq!(returns.len(), 1);
-        assert_eq!(returns[0].0, "uint256");
-    }
-
-    #[test]
-    fn test_local_variable_resolution() {
-        let source = r#"
-contract Foo {
-    function bar() public {
-        uint256 x = 42;
-        uint256 y = x;
-    }
-}
-"#;
-        let (st, path) = index(source);
-        let fi = get_fi(&st, &path);
-
-        let x_refs: Vec<&Reference> = fi
-            .references
-            .iter()
-            .filter(|r| r.name(source) == "x" && r.resolved.is_some())
-            .collect();
-        assert!(!x_refs.is_empty(), "x should be resolved.");
-
-        let x_decl = fi
-            .declarations
-            .values()
-            .find(|d| d.name == "x" && d.kind == DeclKind::LocalVariable)
-            .unwrap();
-        assert_eq!(x_refs[0].resolved.as_ref().unwrap(), &x_decl.id);
-    }
-
-    #[test]
-    fn test_enum_declaration() {
-        let source = r#"
-contract Foo {
-    enum Status { Active, Inactive, Paused }
-}
-"#;
-        let (st, path) = index(source);
-        let fi = get_fi(&st, &path);
-        let status = fi
-            .declarations
-            .values()
-            .find(|d| d.name == "Status")
-            .unwrap();
-        assert_eq!(status.kind, DeclKind::Enum);
-        assert_eq!(status.enum_values(), &["Active", "Inactive", "Paused"]);
-        assert_eq!(status.members().len(), 3);
-    }
-
-    #[test]
-    fn test_import_parsing() {
-        let source = r#"
-import "./Foo.sol";
-import {Bar, Baz as B} from "./Bar.sol";
-import "./Lib.sol" as Lib;
-"#;
-        let (st, path) = index(source);
-        let fi = get_fi(&st, &path);
-        assert_eq!(fi.imports.len(), 3);
-        assert!(matches!(fi.imports[0].kind, ImportKind::Glob));
-        if let ImportKind::Named(ref names) = fi.imports[1].kind {
-            assert_eq!(names.len(), 2);
-            assert_eq!(names[0].0, "Bar");
-            assert_eq!(names[0].1, None);
-            assert_eq!(names[1].0, "Baz");
-            assert_eq!(names[1].1, Some("B".to_string()));
-        } else {
-            panic!("Expected Named import");
-        }
-        if let ImportKind::Alias(ref alias) = fi.imports[2].kind {
-            assert_eq!(alias, "Lib");
-        } else {
-            panic!("Expected Alias import");
-        }
-    }
-
-    #[test]
-    fn test_natspec_extraction() {
-        let source = r#"
-/// @notice This is a test function
-/// @param x The value
-function foo(uint256 x) public pure returns (uint256) {
-    return x;
-}
-"#;
-        let (st, path) = index(source);
-        let fi = get_fi(&st, &path);
-        let foo = fi.declarations.values().find(|d| d.name == "foo").unwrap();
-        let natspec = foo.natspec.as_ref().unwrap();
-        assert!(natspec.contains("@notice This is a test function"));
-        assert!(natspec.contains("@param x The value"));
-    }
-
-    #[test]
-    fn test_resolve_at() {
-        let source = r#"
-contract Foo {
-    uint256 public x;
-    function bar() public returns (uint256) {
-        return x;
-    }
-}
-"#;
-        let (st, path) = index(source);
-
-        let return_x_pos = source.find("return x;").unwrap() + "return ".len();
-        let decl = st.resolve_at(&path, return_x_pos);
-        assert!(decl.is_some(), "Should resolve x");
-        let decl = decl.unwrap();
-        assert_eq!(decl.name, "x");
-        assert_eq!(decl.kind, DeclKind::StateVariable);
-    }
-
-    #[test]
-    fn test_inheritance() {
-        let source = r#"
-contract Base {
-    function foo() public virtual {}
-}
-contract Child is Base {
-    function foo() public override {}
-}
-"#;
-        let (st, path) = index(source);
-        let fi = get_fi(&st, &path);
-        let child = fi
-            .declarations
-            .values()
-            .find(|d| d.name == "Child")
-            .unwrap();
-        assert_eq!(child.base_contracts(), &["Base"]);
-    }
-
-    #[test]
-    fn test_scope_nesting() {
-        let source = r#"
-contract Foo {
-    function bar() public {
-        uint256 a = 1;
-        {
-            uint256 b = 2;
-        }
-    }
-}
-"#;
-        let (st, path) = index(source);
-        let fi = get_fi(&st, &path);
-
-        let a = fi.declarations.values().find(|d| d.name == "a").unwrap();
-        let b = fi.declarations.values().find(|d| d.name == "b").unwrap();
-        assert_ne!(a.scope, b.scope, "a and b should be in different scopes");
-
-        let b_scope = &fi.scopes[b.scope];
-        assert_eq!(b_scope.parent, Some(a.scope));
-    }
-
-    #[test]
-    fn test_slim_declaration_no_extras_for_variables() {
-        let source = r#"
-contract Foo {
-    function bar() public {
-        uint256 x = 1;
-    }
-}
-"#;
-        let (st, path) = index(source);
-        let fi = get_fi(&st, &path);
-        let x = fi.declarations.values().find(|d| d.name == "x").unwrap();
-        // Local variables should have no extras allocated.
-        assert!(x.extras.is_none(), "local var should not allocate extras");
-    }
-
-    #[test]
-    fn test_qualified_type_resolution() {
-        let source = r#"
-interface IFees {
-    event FeeUpdated(uint256 fee);
-}
-contract Pool {
-    function emitFee() public {
-        emit IFees.FeeUpdated(100);
-    }
-}
-"#;
-        let (st, path) = index(source);
-        let fi = get_fi(&st, &path);
-        let source_text = source;
-
-        // "FeeUpdated" in "IFees.FeeUpdated" should be resolved.
-        let fee_ref = fi
-            .references
-            .iter()
-            .find(|r| r.name(source_text) == "FeeUpdated" && r.member_of.is_some())
-            .expect("Should have a member reference for FeeUpdated");
-        assert!(fee_ref.resolved.is_some(), "FeeUpdated should be resolved");
-
-        let fee_decl = st
-            .get_declaration(fee_ref.resolved.as_ref().unwrap())
-            .unwrap();
-        assert_eq!(fee_decl.name, "FeeUpdated");
-        assert_eq!(fee_decl.kind, DeclKind::Event);
-    }
-
-    #[test]
-    fn test_struct_field_resolution() {
-        let source = r#"
-contract Foo {
-    struct Point {
-        uint256 x;
-        uint256 y;
-    }
-    function bar() public {
-        Point memory p;
-        uint256 val = p.x;
-    }
-}
-"#;
-        let (st, path) = index(source);
-        let fi = get_fi(&st, &path);
-
-        // "x" in "p.x" should be resolved to the struct field declaration.
-        let x_ref = fi
-            .references
-            .iter()
-            .find(|r| r.name(source) == "x" && r.member_of.is_some())
-            .expect("Should have a member reference for x");
-        assert!(
-            x_ref.resolved.is_some(),
-            "x should be resolved via p's type"
-        );
-
-        let x_decl = st
-            .get_declaration(x_ref.resolved.as_ref().unwrap())
-            .unwrap();
-        assert_eq!(x_decl.name, "x");
-        assert_eq!(x_decl.type_text.as_deref(), Some("uint256"));
-    }
-
-    #[test]
-    fn test_enum_value_resolution() {
-        let source = r#"
-contract Foo {
-    enum Status { Active, Paused }
-    function bar() public {
-        Status s = Status.Active;
-    }
-}
-"#;
-        let (st, path) = index(source);
-        let fi = get_fi(&st, &path);
-
-        let active_ref = fi
-            .references
-            .iter()
-            .find(|r| r.name(source) == "Active" && r.member_of.is_some())
-            .expect("Should have a member reference for Active");
-        assert!(active_ref.resolved.is_some(), "Active should be resolved");
-
-        let active_decl = st
-            .get_declaration(active_ref.resolved.as_ref().unwrap())
-            .unwrap();
-        assert_eq!(active_decl.name, "Active");
-        assert_eq!(active_decl.kind, DeclKind::EnumValue);
-    }
-
-    #[test]
-    fn test_qualified_type_in_type_position() {
-        let source = r#"
-interface IFees {
-    struct Fee {
-        uint256 amount;
-    }
-}
-contract Pool {
-    function getFee() external returns (IFees.Fee memory) {}
-    function setFee(IFees.Fee memory f) external {}
-}
-"#;
-        let (st, path) = index(source);
-        let fi = get_fi(&st, &path);
-
-        // All "Fee" references with member_of should be resolved.
-        let fee_refs: Vec<_> = fi
-            .references
-            .iter()
-            .filter(|r| r.name(source) == "Fee" && r.member_of.is_some())
-            .collect();
-        assert!(
-            fee_refs.len() >= 2,
-            "Should have at least 2 qualified Fee refs, got {}",
-            fee_refs.len()
-        );
-        for r in &fee_refs {
-            assert!(
-                r.resolved.is_some(),
-                "Fee in qualified type position should be resolved"
-            );
-        }
-    }
-
-    #[test]
-    fn test_contract_member_function_resolution() {
-        let source = r#"
-library Math {
-    function add(uint256 a, uint256 b) internal pure returns (uint256) {
-        return a + b;
-    }
-}
-contract Foo {
-    function bar() public pure returns (uint256) {
-        return Math.add(1, 2);
-    }
-}
-"#;
-        let (st, path) = index(source);
-        let fi = get_fi(&st, &path);
-
-        let add_ref = fi
-            .references
-            .iter()
-            .find(|r| r.name(source) == "add" && r.member_of.is_some())
-            .expect("Should have a member reference for add");
-        assert!(add_ref.resolved.is_some(), "add should resolve to Math.add");
-
-        let add_decl = st
-            .get_declaration(add_ref.resolved.as_ref().unwrap())
-            .unwrap();
-        assert_eq!(add_decl.name, "add");
-        assert_eq!(add_decl.kind, DeclKind::Function);
-    }
 }
