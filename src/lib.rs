@@ -1,4 +1,6 @@
 pub mod completion;
+pub mod fmt_config;
+pub mod formatter;
 pub mod goto;
 pub mod hover;
 pub mod import_resolver;

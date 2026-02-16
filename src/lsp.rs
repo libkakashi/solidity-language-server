@@ -1,4 +1,6 @@
 use crate::completion;
+use crate::fmt_config::{self, FmtConfig};
+use crate::formatter;
 use crate::goto;
 use crate::hover;
 use crate::import_resolver::ImportResolver;
@@ -161,6 +163,7 @@ pub struct SolLsp {
     ts_diag_cache: Arc<RwLock<FxHashMap<Url, Vec<Diagnostic>>>>,
     /// Monotonic sequence number for staleness detection. (Fix #2)
     seq: Arc<std::sync::atomic::AtomicU64>,
+    fmt_config: Arc<RwLock<FmtConfig>>,
 }
 
 impl SolLsp {
@@ -188,6 +191,7 @@ impl SolLsp {
             solar_rx: Arc::new(tokio::sync::Mutex::new(Some(solar_rx))),
             ts_diag_cache,
             seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            fmt_config: Arc::new(RwLock::new(FmtConfig::default())),
         }
     }
 
@@ -236,11 +240,15 @@ impl LanguageServer for SolLsp {
         utils::set_encoding(encoding);
 
         // Update the import resolver with the actual workspace root. (Fix #25)
+        // Also load formatter config (.solidityfmt.toml, foundry.toml, or defaults).
         if let Some(root_uri) = params.root_uri.as_ref() {
             if let Ok(root_path) = root_uri.to_file_path() {
                 let resolver = ImportResolver::new(&root_path);
                 let mut st = self.symbol_table.write().await;
                 st.resolver = resolver;
+                drop(st);
+                let cfg = fmt_config::load_fmt_config(&root_path);
+                *self.fmt_config.write().await = cfg;
             }
         } else if let Some(folders) = params.workspace_folders.as_ref() {
             if let Some(folder) = folders.first() {
@@ -248,6 +256,9 @@ impl LanguageServer for SolLsp {
                     let resolver = ImportResolver::new(&root_path);
                     let mut st = self.symbol_table.write().await;
                     st.resolver = resolver;
+                    drop(st);
+                    let cfg = fmt_config::load_fmt_config(&root_path);
+                    *self.fmt_config.write().await = cfg;
                 }
             }
         }
@@ -281,6 +292,7 @@ impl LanguageServer for SolLsp {
                         work_done_progress: Some(false),
                     },
                 }),
+                document_formatting_provider: Some(OneOf::Left(true)),
                 text_document_sync: Some(TextDocumentSyncCapability::Options(
                     TextDocumentSyncOptions {
                         will_save: Some(true),
@@ -621,6 +633,72 @@ impl LanguageServer for SolLsp {
             Ok(None)
         } else {
             Ok(Some(links))
+        }
+    }
+
+    async fn formatting(
+        &self,
+        params: DocumentFormattingParams,
+    ) -> tower_lsp::jsonrpc::Result<Option<Vec<TextEdit>>> {
+        let uri = &params.text_document.uri;
+
+        let source = {
+            let text_cache = self.text_cache.read().await;
+            match text_cache.get(uri) {
+                Some(cached) => cached.to_string(),
+                None => match uri.to_file_path() {
+                    Ok(path) => match std::fs::read_to_string(&path) {
+                        Ok(c) => c,
+                        Err(_) => return Ok(None),
+                    },
+                    Err(_) => return Ok(None),
+                },
+            }
+        };
+
+        let config = self.fmt_config.read().await.clone();
+
+        // Run formatting on a blocking thread (CPU-bound work).
+        let formatted = tokio::task::spawn_blocking(move || {
+            let mut parser = TsParser::new();
+            let tree = match parser.parse(&source, None) {
+                Some(t) => t,
+                None => return None,
+            };
+            let result = formatter::format(&source, &tree, &config);
+            match result {
+                std::borrow::Cow::Borrowed(_) => None, // No changes needed (returned source as-is).
+                std::borrow::Cow::Owned(formatted) => {
+                    if formatted == source {
+                        None
+                    } else {
+                        Some((formatted, source.lines().count()))
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap_or(None);
+
+        match formatted {
+            Some((new_text, line_count)) => {
+                // Return a single TextEdit replacing the entire document.
+                let edit = TextEdit {
+                    range: Range {
+                        start: Position {
+                            line: 0,
+                            character: 0,
+                        },
+                        end: Position {
+                            line: line_count as u32 + 1,
+                            character: 0,
+                        },
+                    },
+                    new_text,
+                };
+                Ok(Some(vec![edit]))
+            }
+            None => Ok(None),
         }
     }
 }
