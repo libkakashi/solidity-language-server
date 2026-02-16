@@ -4,6 +4,7 @@ use solidity_language_server::hover::hover_info;
 use solidity_language_server::import_resolver::ImportResolver;
 use solidity_language_server::parser::TsParser;
 use solidity_language_server::symbol_table::SymbolTable;
+use solidity_language_server::utils::LineIndex;
 use tower_lsp::lsp_types::{HoverContents, Position};
 
 fn setup(source: &str) -> (SymbolTable, PathBuf) {
@@ -17,7 +18,7 @@ fn setup(source: &str) -> (SymbolTable, PathBuf) {
 }
 
 fn hover_text(source: &str, st: &SymbolTable, path: &PathBuf, pos: Position) -> Option<String> {
-    let hover = hover_info(st, path, source, pos)?;
+    let hover = hover_info(st, path, source, pos, &LineIndex::new(source))?;
     match hover.contents {
         HoverContents::Markup(markup) => Some(markup.value),
         _ => None,

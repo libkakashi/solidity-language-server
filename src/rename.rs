@@ -1,14 +1,19 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use rustc_hash::FxHashMap;
 use tower_lsp::lsp_types::{Position, Range, TextEdit, Url, WorkspaceEdit};
 
 use crate::symbol_table::SymbolTable;
-use crate::utils::{byte_offset_to_position, position_to_byte_offset};
+use crate::utils::LineIndex;
 
 /// Get the identifier at a given position (for prepare-rename).
-pub fn get_identifier_at_position(source: &str, position: Position) -> Option<String> {
-    let abs_offset = position_to_byte_offset(source, position.line, position.character);
+pub fn get_identifier_at_position(
+    source: &str,
+    position: Position,
+    line_index: &LineIndex,
+) -> Option<String> {
+    let abs_offset = line_index.position_to_byte_offset(source, position.line, position.character);
     let bytes = source.as_bytes();
 
     if abs_offset >= bytes.len() {
@@ -36,8 +41,12 @@ pub fn get_identifier_at_position(source: &str, position: Position) -> Option<St
 }
 
 /// Get the range of the identifier at position (for prepare-rename).
-pub fn get_identifier_range(source: &str, position: Position) -> Option<Range> {
-    let abs_offset = position_to_byte_offset(source, position.line, position.character);
+pub fn get_identifier_range(
+    source: &str,
+    position: Position,
+    line_index: &LineIndex,
+) -> Option<Range> {
+    let abs_offset = line_index.position_to_byte_offset(source, position.line, position.character);
     let bytes = source.as_bytes();
 
     if abs_offset >= bytes.len() {
@@ -61,8 +70,8 @@ pub fn get_identifier_range(source: &str, position: Position) -> Option<Range> {
         return None;
     }
 
-    let (start_line, start_col) = byte_offset_to_position(source, start);
-    let (end_line, end_col) = byte_offset_to_position(source, end);
+    let (start_line, start_col) = line_index.byte_offset_to_position(source, start);
+    let (end_line, end_col) = line_index.byte_offset_to_position(source, end);
 
     Some(Range {
         start: Position {
@@ -83,8 +92,9 @@ pub fn rename_symbol(
     source: &str,
     position: Position,
     new_name: &str,
+    line_index: &LineIndex,
 ) -> Option<WorkspaceEdit> {
-    let byte_offset = position_to_byte_offset(source, position.line, position.character);
+    let byte_offset = line_index.position_to_byte_offset(source, position.line, position.character);
 
     let decl = st.resolve_at(file, byte_offset)?;
     let decl_id = decl.id;
@@ -94,13 +104,19 @@ pub fn rename_symbol(
     // Rename the declaration itself.
     {
         let decl_path = st.resolve_path(decl_id.file);
-        let decl_source = if decl_path == file {
-            source.to_string()
+        let (decl_source_owned, decl_src, decl_li_owned);
+        let decl_li;
+        if decl_path == file {
+            decl_src = source;
+            decl_li = line_index;
         } else {
-            std::fs::read_to_string(decl_path).ok()?
+            decl_source_owned = std::fs::read_to_string(decl_path).ok()?;
+            decl_src = &decl_source_owned;
+            decl_li_owned = LineIndex::new(decl_src);
+            decl_li = &decl_li_owned;
         };
-        let (sl, sc) = byte_offset_to_position(&decl_source, decl.name_range.0);
-        let (el, ec) = byte_offset_to_position(&decl_source, decl.name_range.1);
+        let (sl, sc) = decl_li.byte_offset_to_position(decl_src, decl.name_range.0);
+        let (el, ec) = decl_li.byte_offset_to_position(decl_src, decl.name_range.1);
         let uri = Url::from_file_path(decl_path).ok()?;
         changes.entry(uri).or_default().push(TextEdit {
             range: Range {
@@ -117,29 +133,30 @@ pub fn rename_symbol(
         });
     }
 
-    // Rename all references, caching file reads. (Fix #19)
+    // Rename all references, caching file reads + LineIndex. (Fix #19)
     let refs = st.find_references(&decl_id);
-    let mut source_cache: HashMap<&Path, String> = HashMap::new();
+    let mut source_cache: FxHashMap<&Path, (String, LineIndex)> = FxHashMap::default();
 
     for (path, start, end) in &refs {
-        let ref_source = if path.as_path() == file {
-            source
+        let (ref_source, ref_li) = if path.as_path() == file {
+            (source, line_index)
         } else {
             if !source_cache.contains_key(path.as_path()) {
                 match std::fs::read_to_string(path) {
                     Ok(s) => {
-                        source_cache.insert(path.as_path(), s);
+                        let li = LineIndex::new(&s);
+                        source_cache.insert(path.as_path(), (s, li));
                     }
                     Err(_) => continue,
                 }
             }
             match source_cache.get(path.as_path()) {
-                Some(s) => s.as_str(),
+                Some((s, li)) => (s.as_str(), li),
                 None => continue,
             }
         };
-        let (sl, sc) = byte_offset_to_position(ref_source, *start);
-        let (el, ec) = byte_offset_to_position(ref_source, *end);
+        let (sl, sc) = ref_li.byte_offset_to_position(ref_source, *start);
+        let (el, ec) = ref_li.byte_offset_to_position(ref_source, *end);
         if let Ok(uri) = Url::from_file_path(path) {
             changes.entry(uri).or_default().push(TextEdit {
                 range: Range {

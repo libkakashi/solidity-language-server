@@ -4,6 +4,7 @@ use solidity_language_server::completion::handle_completion;
 use solidity_language_server::import_resolver::ImportResolver;
 use solidity_language_server::parser::TsParser;
 use solidity_language_server::symbol_table::SymbolTable;
+use solidity_language_server::utils::LineIndex;
 use tower_lsp::lsp_types::{CompletionResponse, Position};
 
 fn setup(source: &str) -> (SymbolTable, PathBuf) {
@@ -23,7 +24,7 @@ fn completion_labels(
     pos: Position,
     trigger: Option<&str>,
 ) -> Vec<String> {
-    match handle_completion(st, path, source, pos, trigger) {
+    match handle_completion(st, path, source, pos, trigger, &LineIndex::new(source)) {
         Some(CompletionResponse::List(list)) => {
             list.items.iter().map(|i| i.label.clone()).collect()
         }

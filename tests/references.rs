@@ -4,6 +4,7 @@ use solidity_language_server::import_resolver::ImportResolver;
 use solidity_language_server::parser::TsParser;
 use solidity_language_server::references::find_references;
 use solidity_language_server::symbol_table::SymbolTable;
+use solidity_language_server::utils::LineIndex;
 use tower_lsp::lsp_types::Position;
 
 fn setup(source: &str) -> (SymbolTable, PathBuf) {
@@ -40,7 +41,14 @@ contract Token {
     let line = source[..ts_pos].matches('\n').count() as u32;
     let col = (ts_pos - source[..ts_pos].rfind('\n').unwrap() - 1) as u32;
 
-    let refs = find_references(&st, &path, source, Position::new(line, col), true);
+    let refs = find_references(
+        &st,
+        &path,
+        source,
+        Position::new(line, col),
+        true,
+        &LineIndex::new(source),
+    );
     // Declaration + 2 usages = 3
     assert_eq!(
         refs.len(),
@@ -69,7 +77,14 @@ contract Token {
     let line = source[..ts_pos].matches('\n').count() as u32;
     let col = (ts_pos - source[..ts_pos].rfind('\n').unwrap() - 1) as u32;
 
-    let refs = find_references(&st, &path, source, Position::new(line, col), false);
+    let refs = find_references(
+        &st,
+        &path,
+        source,
+        Position::new(line, col),
+        false,
+        &LineIndex::new(source),
+    );
     // Only usages, not declaration
     assert_eq!(
         refs.len(),
@@ -101,7 +116,14 @@ contract Calculator {
     let line = source[..add_call].matches('\n').count() as u32;
     let col = (add_call - source[..add_call].rfind('\n').unwrap() - 1) as u32;
 
-    let refs = find_references(&st, &path, source, Position::new(line, col), true);
+    let refs = find_references(
+        &st,
+        &path,
+        source,
+        Position::new(line, col),
+        true,
+        &LineIndex::new(source),
+    );
     // Declaration + 1 call = 2
     assert_eq!(refs.len(), 2, "Expected 2 references, got {:?}", refs);
 }
@@ -118,7 +140,14 @@ contract Foo {
     let (st, path) = setup(source);
 
     // Position in whitespace — should find nothing
-    let refs = find_references(&st, &path, source, Position::new(0, 0), true);
+    let refs = find_references(
+        &st,
+        &path,
+        source,
+        Position::new(0, 0),
+        true,
+        &LineIndex::new(source),
+    );
     assert!(
         refs.is_empty(),
         "Expected no references for non-identifier position"
@@ -153,7 +182,7 @@ contract Vault {
 
     // Cursor on the struct declaration name
     let pos = first_position(source, "Position");
-    let refs = find_references(&st, &path, source, pos, true);
+    let refs = find_references(&st, &path, source, pos, true, &LineIndex::new(source));
     // 1 declaration + 1 return type + 1 constructor call = 3
     assert_eq!(refs.len(), 3, "Expected 3 references, got {:?}", refs);
 }
@@ -179,7 +208,7 @@ contract Registry {
     let (st, path) = setup(source);
 
     let pos = first_position(source, "Entry");
-    let refs = find_references(&st, &path, source, pos, true);
+    let refs = find_references(&st, &path, source, pos, true, &LineIndex::new(source));
     // 1 declaration + 2 parameter type usages = 3
     assert_eq!(refs.len(), 3, "Expected 3 references, got {:?}", refs);
 }
@@ -202,7 +231,7 @@ contract Transform {
     let (st, path) = setup(source);
 
     let pos = first_position(source, "Data");
-    let refs = find_references(&st, &path, source, pos, true);
+    let refs = find_references(&st, &path, source, pos, true, &LineIndex::new(source));
     // 1 declaration + 1 param type + 1 return type = 3
     assert_eq!(refs.len(), 3, "Expected 3 references, got {:?}", refs);
 }
@@ -225,7 +254,7 @@ contract StateMachine {
     let (st, path) = setup(source);
 
     let pos = first_position(source, "Status");
-    let refs = find_references(&st, &path, source, pos, true);
+    let refs = find_references(&st, &path, source, pos, true, &LineIndex::new(source));
     // 1 declaration + 1 state var type + 1 return type = 3
     assert_eq!(refs.len(), 3, "Expected 3 references, got {:?}", refs);
 }
@@ -251,7 +280,7 @@ contract Marketplace {
     let (st, path) = setup(source);
 
     let pos = first_position(source, "Order");
-    let refs = find_references(&st, &path, source, pos, true);
+    let refs = find_references(&st, &path, source, pos, true, &LineIndex::new(source));
     // 1 declaration + 1 event param type + 1 function param type = 3
     assert_eq!(refs.len(), 3, "Expected 3 references, got {:?}", refs);
 }
@@ -276,7 +305,7 @@ contract Lending {
     let (st, path) = setup(source);
 
     let pos = first_position(source, "Loan");
-    let refs = find_references(&st, &path, source, pos, true);
+    let refs = find_references(&st, &path, source, pos, true, &LineIndex::new(source));
     // 1 declaration + 1 error param type + 1 function param type = 3
     assert_eq!(refs.len(), 3, "Expected 3 references, got {:?}", refs);
 }
@@ -308,7 +337,7 @@ contract MultiRef {
     let (st, path) = setup(source);
 
     let pos = first_position(source, "Token");
-    let refs = find_references(&st, &path, source, pos, true);
+    let refs = find_references(&st, &path, source, pos, true, &LineIndex::new(source));
     // 1 declaration
     // + 1 state variable type
     // + 1 event param type
@@ -338,7 +367,7 @@ contract Pair {
     let (st, path) = setup(source);
 
     let pos = first_position(source, "Info");
-    let refs = find_references(&st, &path, source, pos, true);
+    let refs = find_references(&st, &path, source, pos, true, &LineIndex::new(source));
     // 1 declaration + 1 param type + 2 return types = 4
     assert_eq!(refs.len(), 4, "Expected 4 references, got {:?}", refs);
 }
@@ -366,7 +395,7 @@ contract Exchange {
 
     // Check references to Price: 1 decl + 1 return type + 1 constructor call = 3
     let price_pos = first_position(source, "Price");
-    let price_refs = find_references(&st, &path, source, price_pos, true);
+    let price_refs = find_references(&st, &path, source, price_pos, true, &LineIndex::new(source));
     assert_eq!(
         price_refs.len(),
         3,
@@ -376,7 +405,14 @@ contract Exchange {
 
     // Check references to Volume: 1 decl + 1 return type + 1 constructor call = 3
     let volume_pos = first_position(source, "Volume");
-    let volume_refs = find_references(&st, &path, source, volume_pos, true);
+    let volume_refs = find_references(
+        &st,
+        &path,
+        source,
+        volume_pos,
+        true,
+        &LineIndex::new(source),
+    );
     assert_eq!(
         volume_refs.len(),
         3,
@@ -408,7 +444,7 @@ contract Vault {
     let (st, path) = setup(source);
 
     let pos = first_position(source, "IERC20");
-    let refs = find_references(&st, &path, source, pos, true);
+    let refs = find_references(&st, &path, source, pos, true, &LineIndex::new(source));
     // 1 declaration + 1 return type + 1 constructor call + 1 param type = 4
     assert_eq!(refs.len(), 4, "Expected 4 references, got {:?}", refs);
 }
@@ -431,7 +467,7 @@ contract Pool {
 
     // Position on "FeeUpdated" declaration inside IFees
     let pos = first_position(source, "FeeUpdated");
-    let refs = find_references(&st, &path, source, pos, true);
+    let refs = find_references(&st, &path, source, pos, true, &LineIndex::new(source));
     // 1 declaration + 1 qualified usage in emit = 2
     assert_eq!(
         refs.len(),
@@ -463,7 +499,7 @@ contract Foo {
 
     // Position on "x" in struct declaration
     let pos = first_position(source, "x;");
-    let refs = find_references(&st, &path, source, pos, true);
+    let refs = find_references(&st, &path, source, pos, true, &LineIndex::new(source));
     // 1 declaration + 2 member accesses = 3
     assert_eq!(
         refs.len(),
@@ -491,7 +527,7 @@ contract Foo {
 
     // Position on first "Active" (the declaration inside enum)
     let pos = first_position(source, "Active");
-    let refs = find_references(&st, &path, source, pos, true);
+    let refs = find_references(&st, &path, source, pos, true, &LineIndex::new(source));
     // 1 declaration + 2 qualified usages = 3
     assert_eq!(
         refs.len(),
@@ -528,7 +564,7 @@ contract Access {
     let (st, path) = setup(source);
 
     let pos = first_position(source, "onlyOwner");
-    let refs = find_references(&st, &path, source, pos, true);
+    let refs = find_references(&st, &path, source, pos, true, &LineIndex::new(source));
     // 1 declaration + 3 modifier invocations = 4
     assert_eq!(
         refs.len(),
@@ -558,7 +594,7 @@ contract Factory {
     let (st, path) = setup(source);
 
     let pos = first_position(source, "Token");
-    let refs = find_references(&st, &path, source, pos, true);
+    let refs = find_references(&st, &path, source, pos, true, &LineIndex::new(source));
     // 1 declaration + 1 return type + 2 local var types + 2 new calls = 6
     assert!(
         refs.len() >= 5,
@@ -587,7 +623,7 @@ contract Derived is Base {
     let (st, path) = setup(source);
 
     let pos = first_position(source, "baseFn");
-    let refs = find_references(&st, &path, source, pos, true);
+    let refs = find_references(&st, &path, source, pos, true, &LineIndex::new(source));
     // 1 declaration + 1 call from Derived = 2
     assert_eq!(
         refs.len(),
@@ -621,7 +657,7 @@ contract B {
     let (st, path) = setup(source);
 
     let pos = first_position(source, "helper");
-    let refs = find_references(&st, &path, source, pos, true);
+    let refs = find_references(&st, &path, source, pos, true, &LineIndex::new(source));
     // 1 declaration + 2 calls = 3
     assert_eq!(
         refs.len(),
@@ -651,7 +687,7 @@ contract Calculator {
     let (st, path) = setup(source);
 
     let pos = first_position(source, "add");
-    let refs = find_references(&st, &path, source, pos, true);
+    let refs = find_references(&st, &path, source, pos, true, &LineIndex::new(source));
     // 1 declaration + 2 qualified calls = 3
     assert_eq!(
         refs.len(),
@@ -681,7 +717,7 @@ contract Config {
     let (st, path) = setup(source);
 
     let pos = first_position(source, "MAX_SUPPLY");
-    let refs = find_references(&st, &path, source, pos, true);
+    let refs = find_references(&st, &path, source, pos, true, &LineIndex::new(source));
     // 1 declaration + 2 usages = 3
     assert_eq!(
         refs.len(),
@@ -713,7 +749,7 @@ contract Workflow {
     let (st, path) = setup(source);
 
     let pos = first_position(source, "Phase");
-    let refs = find_references(&st, &path, source, pos, true);
+    let refs = find_references(&st, &path, source, pos, true, &LineIndex::new(source));
     // 1 declaration + 1 state var type + 1 param type + 1 return type = 4
     assert_eq!(
         refs.len(),
@@ -764,7 +800,14 @@ contract Canvas {
 
     // Find references to Point from the helper file
     let pos = first_position(helper_source, "Point");
-    let refs = find_references(&st, &helper_path, helper_source, pos, true);
+    let refs = find_references(
+        &st,
+        &helper_path,
+        helper_source,
+        pos,
+        true,
+        &LineIndex::new(helper_source),
+    );
     // 1 declaration (in Helper.sol) + 2 usages (in Main.sol: state var type + param type) = 3
     assert_eq!(
         refs.len(),
@@ -817,7 +860,14 @@ contract Map {
     // Named imports create a local ImportAlias — searching from the consumer
     // side finds the alias declaration + local usages.
     let pos = first_position(consumer_source, "Coord");
-    let refs = find_references(&st, &consumer_path, consumer_source, pos, true);
+    let refs = find_references(
+        &st,
+        &consumer_path,
+        consumer_source,
+        pos,
+        true,
+        &LineIndex::new(consumer_source),
+    );
     // 1 import alias decl + 2 usages (state var type + param type) = 3
     assert_eq!(
         refs.len(),
@@ -848,7 +898,7 @@ contract Registry {
     let (st, path) = setup(source);
 
     let pos = first_position(source, "Record");
-    let refs = find_references(&st, &path, source, pos, true);
+    let refs = find_references(&st, &path, source, pos, true, &LineIndex::new(source));
     // 1 declaration + 1 mapping value type + 1 return type = 3
     assert_eq!(
         refs.len(),
@@ -882,8 +932,8 @@ contract Counter {
     let (st, path) = setup(source);
 
     let pos = first_position(source, "count");
-    let refs_with = find_references(&st, &path, source, pos, true);
-    let refs_without = find_references(&st, &path, source, pos, false);
+    let refs_with = find_references(&st, &path, source, pos, true, &LineIndex::new(source));
+    let refs_without = find_references(&st, &path, source, pos, false, &LineIndex::new(source));
     // With declaration: 1 decl + 3 usages = 4
     assert_eq!(
         refs_with.len(),
@@ -923,8 +973,8 @@ contract Math {
     let (st, path) = setup(source);
 
     let pos = first_position(source, "double");
-    let refs_with = find_references(&st, &path, source, pos, true);
-    let refs_without = find_references(&st, &path, source, pos, false);
+    let refs_with = find_references(&st, &path, source, pos, true, &LineIndex::new(source));
+    let refs_without = find_references(&st, &path, source, pos, false, &LineIndex::new(source));
     // With declaration: 1 decl + 2 calls = 3
     assert_eq!(
         refs_with.len(),
@@ -965,7 +1015,7 @@ contract TokenB is IERC20 {
     let (st, path) = setup(source);
 
     let pos = first_position(source, "IERC20");
-    let refs = find_references(&st, &path, source, pos, true);
+    let refs = find_references(&st, &path, source, pos, true, &LineIndex::new(source));
     // 1 declaration + 2 inheritance clauses = 3
     assert_eq!(
         refs.len(),
@@ -995,7 +1045,7 @@ contract Vault {
     let (st, path) = setup(source);
 
     let pos = first_position(source, "owner");
-    let refs = find_references(&st, &path, source, pos, true);
+    let refs = find_references(&st, &path, source, pos, true, &LineIndex::new(source));
     // 1 declaration + 1 constructor assignment + 1 getter usage = 3
     assert_eq!(
         refs.len(),
@@ -1026,7 +1076,7 @@ contract Ledger {
     let (st, path) = setup(source);
 
     let pos = first_position(source, "Transfer");
-    let refs = find_references(&st, &path, source, pos, true);
+    let refs = find_references(&st, &path, source, pos, true, &LineIndex::new(source));
     // 1 declaration + 3 emit usages = 4
     assert_eq!(
         refs.len(),

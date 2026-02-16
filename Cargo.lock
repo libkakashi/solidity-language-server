@@ -2340,6 +2340,7 @@ version = "0.1.15"
 dependencies = [
  "clap",
  "eyre",
+ "rustc-hash",
  "solar-compiler",
  "tempfile",
  "thiserror",

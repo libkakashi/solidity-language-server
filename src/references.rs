@@ -1,10 +1,10 @@
-use std::collections::HashMap;
 use std::path::Path;
 
+use rustc_hash::FxHashMap;
 use tower_lsp::lsp_types::{Location, Position, Range, Url};
 
 use crate::symbol_table::{DeclId, SymbolTable};
-use crate::utils::{byte_offset_to_position, position_to_byte_offset};
+use crate::utils::LineIndex;
 
 /// Find all references to the symbol at `position`.
 pub fn find_references(
@@ -13,8 +13,9 @@ pub fn find_references(
     source: &str,
     position: Position,
     include_declaration: bool,
+    line_index: &LineIndex,
 ) -> Vec<Location> {
-    let byte_offset = position_to_byte_offset(source, position.line, position.character);
+    let byte_offset = line_index.position_to_byte_offset(source, position.line, position.character);
 
     let decl = match st.resolve_at(file, byte_offset) {
         Some(d) => d,
@@ -26,7 +27,7 @@ pub fn find_references(
 
     // Include the declaration itself.
     if include_declaration {
-        if let Some(loc) = decl_id_to_location(st, &decl_id, file, source) {
+        if let Some(loc) = decl_id_to_location(st, &decl_id, file, source, line_index) {
             locations.push(loc);
         }
     }
@@ -34,28 +35,29 @@ pub fn find_references(
     // Collect all references using the reverse index. (Fix #18)
     let refs = st.find_references(&decl_id);
 
-    // Cache file reads to avoid reading the same file multiple times. (Fix #19)
-    let mut source_cache: HashMap<&Path, String> = HashMap::new();
+    // Cache file reads + LineIndex to avoid re-reading and re-indexing. (Fix #19)
+    let mut source_cache: FxHashMap<&Path, (String, LineIndex)> = FxHashMap::default();
 
     for (path, start, end) in &refs {
-        let ref_source = if path.as_path() == file {
-            source
+        let (ref_source, ref_li) = if path.as_path() == file {
+            (source, line_index)
         } else {
             if !source_cache.contains_key(path.as_path()) {
                 match std::fs::read_to_string(path) {
                     Ok(s) => {
-                        source_cache.insert(path.as_path(), s);
+                        let li = LineIndex::new(&s);
+                        source_cache.insert(path.as_path(), (s, li));
                     }
                     Err(_) => continue,
                 }
             }
             match source_cache.get(path.as_path()) {
-                Some(s) => s.as_str(),
+                Some((s, li)) => (s.as_str(), li),
                 None => continue,
             }
         };
-        let (start_line, start_col) = byte_offset_to_position(ref_source, *start);
-        let (end_line, end_col) = byte_offset_to_position(ref_source, *end);
+        let (start_line, start_col) = ref_li.byte_offset_to_position(ref_source, *start);
+        let (end_line, end_col) = ref_li.byte_offset_to_position(ref_source, *end);
         if let Ok(uri) = Url::from_file_path(path) {
             locations.push(Location {
                 uri,
@@ -74,7 +76,7 @@ pub fn find_references(
     }
 
     // Deduplicate by (uri, range).
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = rustc_hash::FxHashSet::default();
     locations.retain(|loc| {
         seen.insert((
             loc.uri.clone(),
@@ -93,16 +95,23 @@ fn decl_id_to_location(
     decl_id: &DeclId,
     current_file: &Path,
     current_source: &str,
+    current_line_index: &LineIndex,
 ) -> Option<Location> {
     let decl = st.get_declaration(decl_id)?;
     let decl_path = st.resolve_path(decl.id.file);
-    let source = if decl_path == current_file {
-        current_source.to_string()
+    let (source_owned, src, li_owned);
+    let li;
+    if decl_path == current_file {
+        src = current_source;
+        li = current_line_index;
     } else {
-        std::fs::read_to_string(decl_path).ok()?
+        source_owned = std::fs::read_to_string(decl_path).ok()?;
+        src = &source_owned;
+        li_owned = LineIndex::new(src);
+        li = &li_owned;
     };
-    let (start_line, start_col) = byte_offset_to_position(&source, decl.name_range.0);
-    let (end_line, end_col) = byte_offset_to_position(&source, decl.name_range.1);
+    let (start_line, start_col) = li.byte_offset_to_position(src, decl.name_range.0);
+    let (end_line, end_col) = li.byte_offset_to_position(src, decl.name_range.1);
     let uri = Url::from_file_path(decl_path).ok()?;
     Some(Location {
         uri,

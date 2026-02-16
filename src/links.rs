@@ -3,10 +3,15 @@ use std::path::Path;
 use tower_lsp::lsp_types::{DocumentLink, Position, Range, Url};
 
 use crate::symbol_table::SymbolTable;
-use crate::utils::byte_offset_to_position;
+use crate::utils::LineIndex;
 
 /// Extract document links for import directives (path strings -> resolved files).
-pub fn document_links(st: &SymbolTable, file: &Path, source: &str) -> Vec<DocumentLink> {
+pub fn document_links(
+    st: &SymbolTable,
+    file: &Path,
+    source: &str,
+    line_index: &LineIndex,
+) -> Vec<DocumentLink> {
     let fi = match st.get_file_index(file) {
         Some(fi) => fi,
         None => return vec![],
@@ -44,8 +49,8 @@ pub fn document_links(st: &SymbolTable, file: &Path, source: &str) -> Vec<Docume
             end
         };
 
-        let (sl, sc) = byte_offset_to_position(source, inner_start);
-        let (el, ec) = byte_offset_to_position(source, inner_end);
+        let (sl, sc) = line_index.byte_offset_to_position(source, inner_start);
+        let (el, ec) = line_index.byte_offset_to_position(source, inner_end);
 
         links.push(DocumentLink {
             range: Range {

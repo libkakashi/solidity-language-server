@@ -6,7 +6,7 @@ use tower_lsp::lsp_types::{
 };
 
 use crate::symbol_table::{DeclKind, MemberInfo, SymbolTable};
-use crate::utils::position_to_byte_offset;
+use crate::utils::LineIndex;
 
 /// Handle a completion request.
 pub fn handle_completion(
@@ -15,11 +15,12 @@ pub fn handle_completion(
     source: &str,
     position: Position,
     trigger_char: Option<&str>,
+    line_index: &LineIndex,
 ) -> Option<CompletionResponse> {
     let lines: Vec<&str> = source.lines().collect();
     let _line = lines.get(position.line as usize)?;
 
-    let abs_byte = position_to_byte_offset(source, position.line, position.character);
+    let abs_byte = line_index.position_to_byte_offset(source, position.line, position.character);
     let line_start_byte: usize = source[..abs_byte].rfind('\n').map(|i| i + 1).unwrap_or(0);
     let col_byte = (abs_byte - line_start_byte) as u32;
     let line = &source[line_start_byte

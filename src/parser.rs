@@ -1,7 +1,7 @@
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
 use tree_sitter::{Parser, Tree, TreeCursor};
 
-use crate::utils::byte_offset_to_position;
+use crate::utils::LineIndex;
 
 pub struct TsParser {
     parser: Parser,
@@ -22,16 +22,22 @@ impl TsParser {
 }
 
 pub fn collect_parse_errors(tree: &Tree, source: &str) -> Vec<Diagnostic> {
+    let line_index = LineIndex::new(source);
     let mut errors = Vec::new();
     let mut cursor = tree.walk();
-    walk_errors(&mut cursor, source, &mut errors);
+    walk_errors(&mut cursor, source, &line_index, &mut errors);
     errors
 }
 
-fn walk_errors(cursor: &mut TreeCursor, source: &str, errors: &mut Vec<Diagnostic>) {
+fn walk_errors(
+    cursor: &mut TreeCursor,
+    source: &str,
+    line_index: &LineIndex,
+    errors: &mut Vec<Diagnostic>,
+) {
     let node = cursor.node();
     if node.is_error() || node.is_missing() {
-        let range = node_to_lsp_range(node.start_byte(), node.end_byte(), source);
+        let range = node_to_lsp_range(node.start_byte(), node.end_byte(), source, line_index);
         errors.push(Diagnostic {
             range,
             severity: Some(DiagnosticSeverity::ERROR),
@@ -46,7 +52,7 @@ fn walk_errors(cursor: &mut TreeCursor, source: &str, errors: &mut Vec<Diagnosti
     }
     if cursor.goto_first_child() {
         loop {
-            walk_errors(cursor, source, errors);
+            walk_errors(cursor, source, line_index, errors);
             if !cursor.goto_next_sibling() {
                 break;
             }
@@ -55,9 +61,14 @@ fn walk_errors(cursor: &mut TreeCursor, source: &str, errors: &mut Vec<Diagnosti
     }
 }
 
-pub fn node_to_lsp_range(start_byte: usize, end_byte: usize, source: &str) -> Range {
-    let (start_line, start_col) = byte_offset_to_position(source, start_byte);
-    let (end_line, end_col) = byte_offset_to_position(source, end_byte);
+pub fn node_to_lsp_range(
+    start_byte: usize,
+    end_byte: usize,
+    source: &str,
+    line_index: &LineIndex,
+) -> Range {
+    let (start_line, start_col) = line_index.byte_offset_to_position(source, start_byte);
+    let (end_line, end_col) = line_index.byte_offset_to_position(source, end_byte);
     Range {
         start: Position {
             line: start_line,

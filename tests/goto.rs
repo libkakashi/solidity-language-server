@@ -4,6 +4,7 @@ use solidity_language_server::goto::goto_definition;
 use solidity_language_server::import_resolver::ImportResolver;
 use solidity_language_server::parser::TsParser;
 use solidity_language_server::symbol_table::SymbolTable;
+use solidity_language_server::utils::LineIndex;
 use tower_lsp::lsp_types::Position;
 
 fn setup(source: &str) -> (SymbolTable, PathBuf) {
@@ -36,7 +37,13 @@ contract Counter {
     let line = source[..count_usage].matches('\n').count() as u32;
     let col = (count_usage - source[..count_usage].rfind('\n').unwrap() - 1) as u32;
 
-    let loc = goto_definition(&st, &path, source, Position::new(line, col));
+    let loc = goto_definition(
+        &st,
+        &path,
+        source,
+        Position::new(line, col),
+        &LineIndex::new(source),
+    );
     assert!(loc.is_some(), "Should resolve count to its declaration");
     let loc = loc.unwrap();
     // Declaration of `count` is on line 4
@@ -62,7 +69,13 @@ contract Math {
     let line = source[..a_pos].matches('\n').count() as u32;
     let col = (a_pos - source[..a_pos].rfind('\n').unwrap() - 1) as u32;
 
-    let loc = goto_definition(&st, &path, source, Position::new(line, col));
+    let loc = goto_definition(
+        &st,
+        &path,
+        source,
+        Position::new(line, col),
+        &LineIndex::new(source),
+    );
     assert!(loc.is_some(), "Should resolve parameter 'a'");
     let loc = loc.unwrap();
     // Parameter `a` is declared on the function signature line (line 4)
@@ -89,7 +102,13 @@ contract Test {
     let line = source[..result_pos].matches('\n').count() as u32;
     let col = (result_pos - source[..result_pos].rfind('\n').unwrap() - 1) as u32;
 
-    let loc = goto_definition(&st, &path, source, Position::new(line, col));
+    let loc = goto_definition(
+        &st,
+        &path,
+        source,
+        Position::new(line, col),
+        &LineIndex::new(source),
+    );
     assert!(loc.is_some(), "Should resolve local variable 'result'");
     let loc = loc.unwrap();
     // `result` declared on line 5 (`uint256 result = 42;`)
@@ -121,7 +140,13 @@ contract Registry {
     let line = source[..entry_usage].matches('\n').count() as u32;
     let col = (entry_usage - source[..entry_usage].rfind('\n').unwrap() - 1) as u32;
 
-    let loc = goto_definition(&st, &path, source, Position::new(line, col));
+    let loc = goto_definition(
+        &st,
+        &path,
+        source,
+        Position::new(line, col),
+        &LineIndex::new(source),
+    );
     assert!(loc.is_some(), "Should resolve struct Entry");
     let loc = loc.unwrap();
     // `Entry` struct is declared on line 4
@@ -144,7 +169,13 @@ contract Foo {
     let line = source[..bar_pos].matches('\n').count() as u32;
     let col = (bar_pos - source[..bar_pos].rfind('\n').unwrap() - 1) as u32;
 
-    let loc = goto_definition(&st, &path, source, Position::new(line, col));
+    let loc = goto_definition(
+        &st,
+        &path,
+        source,
+        Position::new(line, col),
+        &LineIndex::new(source),
+    );
     assert!(
         loc.is_some(),
         "Should resolve even on the declaration itself"
@@ -172,7 +203,13 @@ contract Pool {
     let line = source[..pos].matches('\n').count() as u32;
     let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
 
-    let loc = goto_definition(&st, &path, source, Position::new(line, col));
+    let loc = goto_definition(
+        &st,
+        &path,
+        source,
+        Position::new(line, col),
+        &LineIndex::new(source),
+    );
     assert!(
         loc.is_some(),
         "Should resolve FeeUpdated to its declaration in IFees"
@@ -206,7 +243,13 @@ contract Foo {
     let line = source[..pos].matches('\n').count() as u32;
     let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
 
-    let loc = goto_definition(&st, &path, source, Position::new(line, col));
+    let loc = goto_definition(
+        &st,
+        &path,
+        source,
+        Position::new(line, col),
+        &LineIndex::new(source),
+    );
     assert!(
         loc.is_some(),
         "Should resolve x to struct field declaration"
@@ -236,7 +279,13 @@ contract Foo {
     let line = source[..pos].matches('\n').count() as u32;
     let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
 
-    let loc = goto_definition(&st, &path, source, Position::new(line, col));
+    let loc = goto_definition(
+        &st,
+        &path,
+        source,
+        Position::new(line, col),
+        &LineIndex::new(source),
+    );
     assert!(
         loc.is_some(),
         "Should resolve Active to its enum value declaration"
@@ -272,7 +321,13 @@ contract Calculator {
     let line = source[..pos].matches('\n').count() as u32;
     let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
 
-    let loc = goto_definition(&st, &path, source, Position::new(line, col));
+    let loc = goto_definition(
+        &st,
+        &path,
+        source,
+        Position::new(line, col),
+        &LineIndex::new(source),
+    );
     assert!(loc.is_some(), "Should resolve function call to definition");
     let loc = loc.unwrap();
     // function add(...) is declared on line 4
@@ -299,7 +354,13 @@ contract Token {
     let line = source[..pos].matches('\n').count() as u32;
     let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
 
-    let loc = goto_definition(&st, &path, source, Position::new(line, col));
+    let loc = goto_definition(
+        &st,
+        &path,
+        source,
+        Position::new(line, col),
+        &LineIndex::new(source),
+    );
     assert!(
         loc.is_some(),
         "Should resolve event emit to event definition"
@@ -329,7 +390,13 @@ contract Token {
     let line = source[..pos].matches('\n').count() as u32;
     let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
 
-    let loc = goto_definition(&st, &path, source, Position::new(line, col));
+    let loc = goto_definition(
+        &st,
+        &path,
+        source,
+        Position::new(line, col),
+        &LineIndex::new(source),
+    );
     assert!(
         loc.is_some(),
         "Should resolve error revert to error definition"
@@ -360,7 +427,13 @@ contract Access {
     let line = source[..pos].matches('\n').count() as u32;
     let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
 
-    let loc = goto_definition(&st, &path, source, Position::new(line, col));
+    let loc = goto_definition(
+        &st,
+        &path,
+        source,
+        Position::new(line, col),
+        &LineIndex::new(source),
+    );
     assert!(loc.is_some(), "Should resolve modifier usage to definition");
     let loc = loc.unwrap();
     // modifier onlyOwner is declared on line 4
@@ -391,7 +464,13 @@ contract Child is Base {
     let line = source[..pos].matches('\n').count() as u32;
     let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
 
-    let loc = goto_definition(&st, &path, source, Position::new(line, col));
+    let loc = goto_definition(
+        &st,
+        &path,
+        source,
+        Position::new(line, col),
+        &LineIndex::new(source),
+    );
     assert!(
         loc.is_some(),
         "Should resolve inherited function call to base contract"
@@ -422,7 +501,13 @@ contract Registry {
     let line = source[..pos].matches('\n').count() as u32;
     let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
 
-    let loc = goto_definition(&st, &path, source, Position::new(line, col));
+    let loc = goto_definition(
+        &st,
+        &path,
+        source,
+        Position::new(line, col),
+        &LineIndex::new(source),
+    );
     assert!(
         loc.is_some(),
         "Should resolve type in mapping to struct definition"
@@ -455,7 +540,13 @@ contract Factory {
     let line = source[..pos].matches('\n').count() as u32;
     let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
 
-    let loc = goto_definition(&st, &path, source, Position::new(line, col));
+    let loc = goto_definition(
+        &st,
+        &path,
+        source,
+        Position::new(line, col),
+        &LineIndex::new(source),
+    );
     assert!(
         loc.is_some(),
         "Should resolve constructor call to contract definition"
@@ -487,7 +578,13 @@ contract Iter {
     let line = source[..pos].matches('\n').count() as u32;
     let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
 
-    let loc = goto_definition(&st, &path, source, Position::new(line, col));
+    let loc = goto_definition(
+        &st,
+        &path,
+        source,
+        Position::new(line, col),
+        &LineIndex::new(source),
+    );
     assert!(
         loc.is_some(),
         "Should resolve for-loop variable to its declaration"
@@ -509,7 +606,13 @@ contract Empty {
     let (st, path) = setup(source);
 
     // Position on an empty line (line 2 is blank)
-    let loc = goto_definition(&st, &path, source, Position::new(2, 0));
+    let loc = goto_definition(
+        &st,
+        &path,
+        source,
+        Position::new(2, 0),
+        &LineIndex::new(source),
+    );
     assert!(loc.is_none(), "Goto on whitespace should return None");
 }
 
@@ -537,7 +640,13 @@ contract Calculator {
     let line = source[..pos].matches('\n').count() as u32;
     let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
 
-    let loc = goto_definition(&st, &path, source, Position::new(line, col));
+    let loc = goto_definition(
+        &st,
+        &path,
+        source,
+        Position::new(line, col),
+        &LineIndex::new(source),
+    );
     assert!(
         loc.is_some(),
         "Should resolve library qualified function call"
@@ -569,7 +678,13 @@ contract Child is Base {
     let line = source[..pos].matches('\n').count() as u32;
     let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
 
-    let loc = goto_definition(&st, &path, source, Position::new(line, col));
+    let loc = goto_definition(
+        &st,
+        &path,
+        source,
+        Position::new(line, col),
+        &LineIndex::new(source),
+    );
     assert!(
         loc.is_some(),
         "Should resolve base contract name in inheritance"
@@ -603,7 +718,13 @@ contract Registry {
     let line = source[..pos].matches('\n').count() as u32;
     let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
 
-    let loc = goto_definition(&st, &path, source, Position::new(line, col));
+    let loc = goto_definition(
+        &st,
+        &path,
+        source,
+        Position::new(line, col),
+        &LineIndex::new(source),
+    );
     assert!(
         loc.is_some(),
         "Should resolve return type to struct definition"
@@ -657,7 +778,13 @@ contract Exchange {
     let line = main_source[..pos].matches('\n').count() as u32;
     let col = (pos - main_source[..pos].rfind('\n').unwrap() - 1) as u32;
 
-    let loc = goto_definition(&st, &main_path, main_source, Position::new(line, col));
+    let loc = goto_definition(
+        &st,
+        &main_path,
+        main_source,
+        Position::new(line, col),
+        &LineIndex::new(main_source),
+    );
     assert!(
         loc.is_some(),
         "Should resolve cross-file struct field access"
@@ -687,7 +814,13 @@ contract Game {
     let line = source[..pos].matches('\n').count() as u32;
     let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
 
-    let loc = goto_definition(&st, &path, source, Position::new(line, col));
+    let loc = goto_definition(
+        &st,
+        &path,
+        source,
+        Position::new(line, col),
+        &LineIndex::new(source),
+    );
     assert!(
         loc.is_some(),
         "Should resolve enum value to enum definition"
@@ -718,7 +851,13 @@ contract Exchange {
     let line = source[..pos].matches('\n').count() as u32;
     let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
 
-    let loc = goto_definition(&st, &path, source, Position::new(line, col));
+    let loc = goto_definition(
+        &st,
+        &path,
+        source,
+        Position::new(line, col),
+        &LineIndex::new(source),
+    );
     assert!(
         loc.is_some(),
         "Should resolve parameter type to contract definition"

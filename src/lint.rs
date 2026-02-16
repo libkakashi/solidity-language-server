@@ -42,6 +42,7 @@ impl LintEngine {
     }
 
     pub fn run(&self, tree: &Tree, source: &str) -> Vec<Diagnostic> {
+        let line_index = crate::utils::LineIndex::new(source);
         let mut diagnostics = Vec::new();
         // Reuse a single QueryCursor across rules. (Fix #20)
         let mut cursor = QueryCursor::new();
@@ -71,6 +72,7 @@ impl LintEngine {
                             hit.start_byte,
                             hit.end_byte,
                             source,
+                            &line_index,
                             &hit.message,
                         ));
                     }
@@ -81,6 +83,7 @@ impl LintEngine {
                             node.start_byte(),
                             node.end_byte(),
                             source,
+                            &line_index,
                             rule.description,
                         ));
                     }
@@ -89,7 +92,13 @@ impl LintEngine {
         }
 
         // Run the two-pass unused-import check separately.
-        diagnostics.extend(check_unused_imports(tree, source, &self.rules, &mut cursor));
+        diagnostics.extend(check_unused_imports(
+            tree,
+            source,
+            &self.rules,
+            &mut cursor,
+            &line_index,
+        ));
 
         diagnostics
     }
@@ -111,9 +120,10 @@ fn make_diagnostic(
     start_byte: usize,
     end_byte: usize,
     source: &str,
+    line_index: &crate::utils::LineIndex,
     message: &str,
 ) -> Diagnostic {
-    let range = node_to_lsp_range(start_byte, end_byte, source);
+    let range = node_to_lsp_range(start_byte, end_byte, source, line_index);
     Diagnostic {
         range,
         severity: Some(rule.severity),
@@ -497,6 +507,7 @@ fn check_unused_imports(
     source: &str,
     rules: &[LintRule],
     cursor: &mut QueryCursor,
+    line_index: &crate::utils::LineIndex,
 ) -> Vec<Diagnostic> {
     let rule = match rules.iter().find(|r| r.id == "unused-import") {
         Some(r) => r,
@@ -537,7 +548,7 @@ fn check_unused_imports(
     for (name, start_byte, end_byte) in &imports {
         if !used_names.contains(name.as_str()) {
             diagnostics.push(Diagnostic {
-                range: node_to_lsp_range(*start_byte, *end_byte, source),
+                range: node_to_lsp_range(*start_byte, *end_byte, source, line_index),
                 severity: Some(rule.severity),
                 code: Some(NumberOrString::String(rule.id.to_string())),
                 source: Some("ts-lint".into()),

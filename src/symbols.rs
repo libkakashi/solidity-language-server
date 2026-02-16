@@ -7,10 +7,15 @@ use tower_lsp::lsp_types::{
 };
 
 use crate::symbol_table::{DeclKind, Declaration, FileIndex, ScopeKind, SymbolTable};
-use crate::utils::byte_offset_to_position;
+use crate::utils::LineIndex;
 
 /// Extract document symbols for a single file (hierarchical tree).
-pub fn document_symbols(st: &SymbolTable, file: &Path, source: &str) -> Vec<DocumentSymbol> {
+pub fn document_symbols(
+    st: &SymbolTable,
+    file: &Path,
+    source: &str,
+    line_index: &LineIndex,
+) -> Vec<DocumentSymbol> {
     let fi = match st.get_file_index(file) {
         Some(fi) => fi,
         None => return vec![],
@@ -24,14 +29,14 @@ pub fn document_symbols(st: &SymbolTable, file: &Path, source: &str) -> Vec<Docu
         }
         match decl.kind {
             DeclKind::Contract | DeclKind::Interface | DeclKind::Library => {
-                let children = collect_children(fi, source, decl);
-                top_level.push(make_document_symbol(decl, source, children));
+                let children = collect_children(fi, source, decl, line_index);
+                top_level.push(make_document_symbol(decl, source, children, line_index));
             }
             DeclKind::ImportAlias => {
-                top_level.push(make_document_symbol(decl, source, vec![]));
+                top_level.push(make_document_symbol(decl, source, vec![], line_index));
             }
             _ => {
-                top_level.push(make_document_symbol(decl, source, vec![]));
+                top_level.push(make_document_symbol(decl, source, vec![], line_index));
             }
         }
     }
@@ -68,6 +73,8 @@ pub fn workspace_symbols(st: &SymbolTable, query: &str) -> Vec<SymbolInformation
             Err(_) => continue,
         };
 
+        let ws_line_index = LineIndex::new(source_ref);
+
         for decl in fi.declarations.values() {
             if !query_lower.is_empty() && !decl.name.to_lowercase().contains(&query_lower) {
                 continue;
@@ -77,8 +84,8 @@ pub fn workspace_symbols(st: &SymbolTable, query: &str) -> Vec<SymbolInformation
             }
 
             let container_name = find_container_name(fi, decl);
-            let (sl, sc) = byte_offset_to_position(source_ref, decl.full_range.0);
-            let (el, ec) = byte_offset_to_position(source_ref, decl.full_range.1);
+            let (sl, sc) = ws_line_index.byte_offset_to_position(source_ref, decl.full_range.0);
+            let (el, ec) = ws_line_index.byte_offset_to_position(source_ref, decl.full_range.1);
 
             results.push(SymbolInformation {
                 name: decl.name.clone(),
@@ -106,7 +113,12 @@ pub fn workspace_symbols(st: &SymbolTable, query: &str) -> Vec<SymbolInformation
     results
 }
 
-fn collect_children(fi: &FileIndex, source: &str, parent: &Declaration) -> Vec<DocumentSymbol> {
+fn collect_children(
+    fi: &FileIndex,
+    source: &str,
+    parent: &Declaration,
+    line_index: &LineIndex,
+) -> Vec<DocumentSymbol> {
     let contract_scope = fi.scopes.iter().find(|s| {
         matches!(
             s.kind,
@@ -135,8 +147,8 @@ fn collect_children(fi: &FileIndex, source: &str, parent: &Declaration) -> Vec<D
                 d.members()
                     .iter()
                     .map(|m| {
-                        let (sl, sc) = byte_offset_to_position(source, m.name_range.0);
-                        let (el, ec) = byte_offset_to_position(source, m.name_range.1);
+                        let (sl, sc) = line_index.byte_offset_to_position(source, m.name_range.0);
+                        let (el, ec) = line_index.byte_offset_to_position(source, m.name_range.1);
                         DocumentSymbol {
                             name: m.name.clone(),
                             detail: Some(m.type_text.clone()),
@@ -173,7 +185,7 @@ fn collect_children(fi: &FileIndex, source: &str, parent: &Declaration) -> Vec<D
             } else {
                 vec![]
             };
-            make_document_symbol(d, source, grandchildren)
+            make_document_symbol(d, source, grandchildren, line_index)
         })
         .collect();
 
@@ -185,11 +197,12 @@ fn make_document_symbol(
     decl: &Declaration,
     source: &str,
     children: Vec<DocumentSymbol>,
+    line_index: &LineIndex,
 ) -> DocumentSymbol {
-    let (sl, sc) = byte_offset_to_position(source, decl.full_range.0);
-    let (el, ec) = byte_offset_to_position(source, decl.full_range.1);
-    let (nsl, nsc) = byte_offset_to_position(source, decl.name_range.0);
-    let (nel, nec) = byte_offset_to_position(source, decl.name_range.1);
+    let (sl, sc) = line_index.byte_offset_to_position(source, decl.full_range.0);
+    let (el, ec) = line_index.byte_offset_to_position(source, decl.full_range.1);
+    let (nsl, nsc) = line_index.byte_offset_to_position(source, decl.name_range.0);
+    let (nel, nec) = line_index.byte_offset_to_position(source, decl.name_range.1);
 
     DocumentSymbol {
         name: decl.name.clone(),

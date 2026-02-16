@@ -3,7 +3,7 @@ use std::path::Path;
 use tower_lsp::lsp_types::{Hover, HoverContents, MarkupContent, MarkupKind, Position};
 
 use crate::symbol_table::{DeclKind, SymbolTable};
-use crate::utils::position_to_byte_offset;
+use crate::utils::LineIndex;
 
 /// Produce hover information for the symbol at the given position.
 pub fn hover_info(
@@ -11,8 +11,9 @@ pub fn hover_info(
     file: &Path,
     source: &str,
     position: Position,
+    line_index: &LineIndex,
 ) -> Option<Hover> {
-    let byte_offset = position_to_byte_offset(source, position.line, position.character);
+    let byte_offset = line_index.position_to_byte_offset(source, position.line, position.character);
     let decl = st.resolve_at(file, byte_offset)?;
 
     let mut parts: Vec<String> = Vec::new();

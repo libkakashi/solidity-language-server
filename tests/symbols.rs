@@ -4,6 +4,7 @@ use solidity_language_server::import_resolver::ImportResolver;
 use solidity_language_server::parser::TsParser;
 use solidity_language_server::symbol_table::SymbolTable;
 use solidity_language_server::symbols::{document_symbols, workspace_symbols};
+use solidity_language_server::utils::LineIndex;
 use tower_lsp::lsp_types::SymbolKind;
 
 fn setup(source: &str) -> (SymbolTable, PathBuf) {
@@ -53,7 +54,7 @@ contract ERC20 {
 }
 "#;
     let (st, path) = setup(source);
-    let syms = document_symbols(&st, &path, source);
+    let syms = document_symbols(&st, &path, source, &LineIndex::new(source));
 
     // Should have exactly one top-level symbol: ERC20 contract
     assert_eq!(
@@ -98,7 +99,7 @@ contract Registry {
 }
 "#;
     let (st, path) = setup(source);
-    let syms = document_symbols(&st, &path, source);
+    let syms = document_symbols(&st, &path, source, &LineIndex::new(source));
 
     assert_eq!(syms.len(), 1);
     let children = syms[0].children.as_ref().unwrap();
@@ -183,7 +184,7 @@ contract Ordered {
 }
 "#;
     let (st, path) = setup(source);
-    let syms = document_symbols(&st, &path, source);
+    let syms = document_symbols(&st, &path, source, &LineIndex::new(source));
 
     let children = syms[0].children.as_ref().unwrap();
     // Verify they are sorted by line number

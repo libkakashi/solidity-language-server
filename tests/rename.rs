@@ -6,6 +6,7 @@ use solidity_language_server::rename::{
     get_identifier_at_position, get_identifier_range, rename_symbol,
 };
 use solidity_language_server::symbol_table::SymbolTable;
+use solidity_language_server::utils::LineIndex;
 use tower_lsp::lsp_types::Position;
 
 fn setup(source: &str) -> (SymbolTable, PathBuf) {
@@ -31,7 +32,8 @@ contract Foo {
     let line = source[..fn_pos].matches('\n').count() as u32;
     let col = (fn_pos - source[..fn_pos].rfind('\n').unwrap() - 1) as u32;
 
-    let ident = get_identifier_at_position(source, Position::new(line, col));
+    let ident =
+        get_identifier_at_position(source, Position::new(line, col), &LineIndex::new(source));
     assert_eq!(ident, Some("myFunction".to_string()));
 }
 
@@ -48,7 +50,7 @@ contract Foo {
     let line = source[..var_pos].matches('\n').count() as u32;
     let col = (var_pos - source[..var_pos].rfind('\n').unwrap() - 1) as u32;
 
-    let range = get_identifier_range(source, Position::new(line, col));
+    let range = get_identifier_range(source, Position::new(line, col), &LineIndex::new(source));
     assert!(range.is_some());
     let range = range.unwrap();
     // Range should cover exactly "myVar"
@@ -84,7 +86,14 @@ contract Token {
     let line = source[..bal_pos].matches('\n').count() as u32;
     let col = (bal_pos - source[..bal_pos].rfind('\n').unwrap() - 1) as u32;
 
-    let edit = rename_symbol(&st, &path, source, Position::new(line, col), "totalBalance");
+    let edit = rename_symbol(
+        &st,
+        &path,
+        source,
+        Position::new(line, col),
+        "totalBalance",
+        &LineIndex::new(source),
+    );
     assert!(edit.is_some(), "Should produce a workspace edit");
 
     let edit = edit.unwrap();
@@ -111,7 +120,7 @@ pragma solidity ^0.8.29;
 
 contract Foo {}
 "#;
-    let ident = get_identifier_at_position(source, Position::new(0, 0));
+    let ident = get_identifier_at_position(source, Position::new(0, 0), &LineIndex::new(source));
     // Line 0 col 0 is `/` from the comment
     assert!(ident.is_none() || ident.unwrap().is_empty() == false);
 }
@@ -144,7 +153,14 @@ contract Foo {
     let line = source[..func_pos].matches('\n').count() as u32;
     let col = (func_pos - source[..func_pos].rfind('\n').unwrap() - 1) as u32;
 
-    let edit = rename_symbol(&st, &path, source, Position::new(line, col), "renamedFunc");
+    let edit = rename_symbol(
+        &st,
+        &path,
+        source,
+        Position::new(line, col),
+        "renamedFunc",
+        &LineIndex::new(source),
+    );
     assert!(edit.is_some(), "Should produce a workspace edit");
 
     let edit = edit.unwrap();
@@ -189,7 +205,14 @@ contract Foo {
     let line = source[..struct_pos].matches('\n').count() as u32;
     let col = (struct_pos - source[..struct_pos].rfind('\n').unwrap() - 1) as u32;
 
-    let edit = rename_symbol(&st, &path, source, Position::new(line, col), "Coordinate");
+    let edit = rename_symbol(
+        &st,
+        &path,
+        source,
+        Position::new(line, col),
+        "Coordinate",
+        &LineIndex::new(source),
+    );
     assert!(edit.is_some(), "Should produce a workspace edit");
 
     let edit = edit.unwrap();
@@ -237,7 +260,14 @@ contract Foo {
     let line = source[..field_pos].matches('\n').count() as u32;
     let col = (field_pos - source[..field_pos].rfind('\n').unwrap() - 1) as u32;
 
-    let edit = rename_symbol(&st, &path, source, Position::new(line, col), "xCoord");
+    let edit = rename_symbol(
+        &st,
+        &path,
+        source,
+        Position::new(line, col),
+        "xCoord",
+        &LineIndex::new(source),
+    );
     assert!(edit.is_some(), "Should produce a workspace edit");
 
     let edit = edit.unwrap();
@@ -278,7 +308,14 @@ contract Foo {
     let line = source[..enum_pos].matches('\n').count() as u32;
     let col = (enum_pos - source[..enum_pos].rfind('\n').unwrap() - 1) as u32;
 
-    let edit = rename_symbol(&st, &path, source, Position::new(line, col), "State");
+    let edit = rename_symbol(
+        &st,
+        &path,
+        source,
+        Position::new(line, col),
+        "State",
+        &LineIndex::new(source),
+    );
     assert!(edit.is_some(), "Should produce a workspace edit");
 
     let edit = edit.unwrap();
@@ -325,7 +362,14 @@ contract Token {
     let line = source[..var_pos].matches('\n').count() as u32;
     let col = (var_pos - source[..var_pos].rfind('\n').unwrap() - 1) as u32;
 
-    let edit = rename_symbol(&st, &path, source, Position::new(line, col), "supply");
+    let edit = rename_symbol(
+        &st,
+        &path,
+        source,
+        Position::new(line, col),
+        "supply",
+        &LineIndex::new(source),
+    );
     assert!(edit.is_some(), "Should produce a workspace edit");
 
     let edit = edit.unwrap();
@@ -374,6 +418,7 @@ contract Token {
         source,
         Position::new(line, col),
         "TokenTransfer",
+        &LineIndex::new(source),
     );
     assert!(edit.is_some(), "Should produce a workspace edit");
 
@@ -411,7 +456,14 @@ contract Foo {
     let line = source[..param_pos].matches('\n').count() as u32;
     let col = (param_pos - source[..param_pos].rfind('\n').unwrap() - 1) as u32;
 
-    let edit = rename_symbol(&st, &path, source, Position::new(line, col), "value");
+    let edit = rename_symbol(
+        &st,
+        &path,
+        source,
+        Position::new(line, col),
+        "value",
+        &LineIndex::new(source),
+    );
     assert!(edit.is_some(), "Should produce a workspace edit");
 
     let edit = edit.unwrap();
@@ -460,7 +512,14 @@ contract Owned {
     let line = source[..mod_pos].matches('\n').count() as u32;
     let col = (mod_pos - source[..mod_pos].rfind('\n').unwrap() - 1) as u32;
 
-    let edit = rename_symbol(&st, &path, source, Position::new(line, col), "ownerOnly");
+    let edit = rename_symbol(
+        &st,
+        &path,
+        source,
+        Position::new(line, col),
+        "ownerOnly",
+        &LineIndex::new(source),
+    );
     assert!(edit.is_some(), "Should produce a workspace edit");
 
     let edit = edit.unwrap();
@@ -492,7 +551,8 @@ contract Foo {
     let line = source[..var_pos].matches('\n').count() as u32;
     let col = (var_pos - source[..var_pos].rfind('\n').unwrap() - 1) as u32;
 
-    let ident = get_identifier_at_position(source, Position::new(line, col));
+    let ident =
+        get_identifier_at_position(source, Position::new(line, col), &LineIndex::new(source));
     assert_eq!(ident, Some("myVariable".to_string()));
 }
 
@@ -509,7 +569,8 @@ contract Foo {
     let line = source[..var_pos].matches('\n').count() as u32;
     let col = (var_pos - source[..var_pos].rfind('\n').unwrap() - 1) as u32;
 
-    let ident = get_identifier_at_position(source, Position::new(line, col));
+    let ident =
+        get_identifier_at_position(source, Position::new(line, col), &LineIndex::new(source));
     assert_eq!(ident, Some("myVariable".to_string()));
 }
 
@@ -526,7 +587,8 @@ contract Foo {
     let line = source[..var_pos].matches('\n').count() as u32;
     let col = (var_pos - source[..var_pos].rfind('\n').unwrap() - 1) as u32;
 
-    let ident = get_identifier_at_position(source, Position::new(line, col));
+    let ident =
+        get_identifier_at_position(source, Position::new(line, col), &LineIndex::new(source));
     assert_eq!(ident, Some("myVariable".to_string()));
 }
 
@@ -545,7 +607,8 @@ contract Foo {
     let line = source[..plus_pos].matches('\n').count() as u32;
     let col = (plus_pos - source[..plus_pos].rfind('\n').unwrap() - 1) as u32;
 
-    let ident = get_identifier_at_position(source, Position::new(line, col));
+    let ident =
+        get_identifier_at_position(source, Position::new(line, col), &LineIndex::new(source));
     assert!(ident.is_none() || ident == Some("".to_string()));
 }
 
@@ -564,7 +627,8 @@ contract Foo {
     let line = source[..eq_pos].matches('\n').count() as u32;
     let col = (eq_pos - source[..eq_pos].rfind('\n').unwrap() - 1) as u32;
 
-    let ident = get_identifier_at_position(source, Position::new(line, col));
+    let ident =
+        get_identifier_at_position(source, Position::new(line, col), &LineIndex::new(source));
     assert!(ident.is_none() || ident == Some("".to_string()));
 }
 
@@ -582,7 +646,8 @@ contract Foo {
     let line = source[..semi_pos].matches('\n').count() as u32;
     let col = (semi_pos - source[..semi_pos].rfind('\n').unwrap() - 1) as u32;
 
-    let ident = get_identifier_at_position(source, Position::new(line, col));
+    let ident =
+        get_identifier_at_position(source, Position::new(line, col), &LineIndex::new(source));
     assert!(ident.is_none() || ident == Some("".to_string()));
 }
 
@@ -598,7 +663,8 @@ contract Foo {
     let line = source[..brace_pos].matches('\n').count() as u32;
     let col = (brace_pos - source[..brace_pos].rfind('\n').unwrap() - 1) as u32;
 
-    let ident = get_identifier_at_position(source, Position::new(line, col));
+    let ident =
+        get_identifier_at_position(source, Position::new(line, col), &LineIndex::new(source));
     assert!(ident.is_none() || ident == Some("".to_string()));
 }
 
@@ -618,7 +684,14 @@ contract Foo {
     let line = source[..x_pos].matches('\n').count() as u32;
     let col = (x_pos - source[..x_pos].rfind('\n').unwrap() - 1) as u32;
 
-    let edit = rename_symbol(&st, &path, source, Position::new(line, col), "y");
+    let edit = rename_symbol(
+        &st,
+        &path,
+        source,
+        Position::new(line, col),
+        "y",
+        &LineIndex::new(source),
+    );
 
     // Even if the symbol is found, it should produce valid edits or none
     if let Some(edit) = edit {
@@ -663,6 +736,7 @@ contract Owned {
         source,
         Position::new(line, col),
         "_ownerAddress",
+        &LineIndex::new(source),
     );
     assert!(edit.is_some(), "Should produce a workspace edit");
 
@@ -708,7 +782,14 @@ contract Foo {
     let line = source[..pending_pos].matches('\n').count() as u32;
     let col = (pending_pos - source[..pending_pos].rfind('\n').unwrap() - 1) as u32;
 
-    let edit = rename_symbol(&st, &path, source, Position::new(line, col), "Waiting");
+    let edit = rename_symbol(
+        &st,
+        &path,
+        source,
+        Position::new(line, col),
+        "Waiting",
+        &LineIndex::new(source),
+    );
     assert!(edit.is_some(), "Should produce a workspace edit");
 
     let edit = edit.unwrap();

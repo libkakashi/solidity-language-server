@@ -1,10 +1,13 @@
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use rustc_hash::{FxHashMap, FxHashSet};
 use tree_sitter::Node;
 
 use crate::import_resolver::ImportResolver;
 use crate::parser::TsParser;
+
+type HashMap<K, V> = FxHashMap<K, V>;
 
 // ---------------------------------------------------------------------------
 // Path interning — every file gets a small integer FileId instead of
@@ -260,8 +263,10 @@ pub struct SymbolTable {
     pub resolver: ImportResolver,
     /// Reverse index: DeclId → list of (FileId, start_byte, end_byte). (Fix #18)
     pub ref_index: HashMap<DeclId, Vec<(FileId, usize, usize)>>,
-    /// Source text cache for resolving reference names. (Fix #12)
-    sources: HashMap<FileId, String>,
+    /// Secondary index: FileId → DeclIds that have refs from this file. O(1) cleanup.
+    ref_index_by_file: HashMap<FileId, Vec<DeclId>>,
+    /// Source text cache for resolving reference names. Arc<str> for cheap cloning. (Fix #12)
+    sources: HashMap<FileId, Arc<str>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -271,11 +276,12 @@ pub struct SymbolTable {
 impl SymbolTable {
     pub fn new(resolver: ImportResolver) -> Self {
         Self {
-            files: HashMap::new(),
+            files: Default::default(),
             interner: PathInterner::default(),
             resolver,
-            ref_index: HashMap::new(),
-            sources: HashMap::new(),
+            ref_index: Default::default(),
+            ref_index_by_file: Default::default(),
+            sources: Default::default(),
         }
     }
 
@@ -291,7 +297,22 @@ impl SymbolTable {
 
     /// Get stored source text for a file.
     pub fn get_source(&self, file_id: FileId) -> Option<&str> {
-        self.sources.get(&file_id).map(|s| s.as_str())
+        self.sources.get(&file_id).map(|s| &**s)
+    }
+
+    /// Remove all ref_index entries contributed by a given file. O(k) where k is
+    /// the number of DeclIds referenced from this file, rather than O(total refs).
+    fn clear_refs_for_file(&mut self, file_id: FileId) {
+        if let Some(decl_ids) = self.ref_index_by_file.remove(&file_id) {
+            for decl_id in decl_ids {
+                if let Some(refs) = self.ref_index.get_mut(&decl_id) {
+                    refs.retain(|(fid, _, _)| *fid != file_id);
+                    if refs.is_empty() {
+                        self.ref_index.remove(&decl_id);
+                    }
+                }
+            }
+        }
     }
 
     /// Index a single file. Replaces any existing index for this path.
@@ -301,31 +322,21 @@ impl SymbolTable {
             None => return,
         };
         let file_id = self.interner.get_or_intern(path);
-
-        // Remove old reverse index entries for this file.
-        self.ref_index.retain(|_, refs| {
-            refs.retain(|(fid, _, _)| *fid != file_id);
-            !refs.is_empty()
-        });
+        self.clear_refs_for_file(file_id);
 
         let file_index = build_file_index(file_id, source, &tree.root_node(), &self.resolver, path);
         self.files.insert(file_id, file_index);
-        self.sources.insert(file_id, source.to_string());
+        self.sources.insert(file_id, Arc::from(source));
     }
 
     /// Index from an already-parsed tree — avoids double parsing. (Fix #1)
     pub fn index_file_with_tree(&mut self, path: &Path, source: &str, tree: &tree_sitter::Tree) {
         let file_id = self.interner.get_or_intern(path);
-
-        // Remove old reverse index entries for this file.
-        self.ref_index.retain(|_, refs| {
-            refs.retain(|(fid, _, _)| *fid != file_id);
-            !refs.is_empty()
-        });
+        self.clear_refs_for_file(file_id);
 
         let file_index = build_file_index(file_id, source, &tree.root_node(), &self.resolver, path);
         self.files.insert(file_id, file_index);
-        self.sources.insert(file_id, source.to_string());
+        self.sources.insert(file_id, Arc::from(source));
     }
 
     /// Ensure a file is indexed, reading from disk if necessary.
@@ -373,10 +384,7 @@ impl SymbolTable {
         if let Some(file_id) = self.interner.lookup(path) {
             self.files.remove(&file_id);
             self.sources.remove(&file_id);
-            self.ref_index.retain(|_, refs| {
-                refs.retain(|(fid, _, _)| *fid != file_id);
-                !refs.is_empty()
-            });
+            self.clear_refs_for_file(file_id);
         }
     }
 
@@ -429,7 +437,7 @@ impl SymbolTable {
         };
         let mut result = Vec::new();
         let mut current = Some(scope_id);
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = FxHashSet::default();
         while let Some(sid) = current {
             if let Some(scope) = fi.scopes.get(sid) {
                 for (_, decl_id) in &scope.declarations {
@@ -575,7 +583,7 @@ fn build_file_index(
     let mut fi = FileIndex {
         file_id,
         scopes: Vec::new(),
-        declarations: HashMap::new(),
+        declarations: Default::default(),
         references: Vec::new(),
         imports: Vec::new(),
     };
@@ -2098,6 +2106,10 @@ fn resolve_references(st: &mut SymbolTable, file_id: FileId) {
                 .entry(*decl_id)
                 .or_default()
                 .push((file_id, start, end));
+            st.ref_index_by_file
+                .entry(file_id)
+                .or_default()
+                .push(*decl_id);
         }
         if let Some(fi) = st.files.get_mut(&file_id) {
             if let Some(r) = fi.references.get_mut(idx) {
@@ -2121,6 +2133,10 @@ fn resolve_references(st: &mut SymbolTable, file_id: FileId) {
                 .entry(*decl_id)
                 .or_default()
                 .push((file_id, start, end));
+            st.ref_index_by_file
+                .entry(file_id)
+                .or_default()
+                .push(*decl_id);
         }
         if let Some(fi) = st.files.get_mut(&file_id) {
             if let Some(r) = fi.references.get_mut(idx) {
@@ -2375,6 +2391,8 @@ fn find_member_by_decl_id(
 
 /// Find a type declaration by name, searching the given file and its imports.
 fn find_type_declaration(st: &SymbolTable, origin_file: FileId, type_name: &str) -> Option<DeclId> {
+    // Collect import target FileIds without cloning ImportInfo.
+    let import_fids: Vec<FileId>;
     if let Some(fi) = st.files.get(&origin_file) {
         // Search current file.
         for decl in fi.declarations.values() {
@@ -2382,18 +2400,22 @@ fn find_type_declaration(st: &SymbolTable, origin_file: FileId, type_name: &str)
                 return Some(decl.id);
             }
         }
-        // Search imported files.
-        let imports: Vec<ImportInfo> = fi.imports.clone();
-        for imp in &imports {
-            if let Some(ref resolved_path) = imp.resolved_path {
-                if let Some(target_fid) = st.interner.lookup(resolved_path) {
-                    if let Some(target_fi) = st.files.get(&target_fid) {
-                        if let Some(decl) = find_top_level_by_name(target_fi, type_name) {
-                            if is_member_bearing_kind(decl.kind) {
-                                return Some(decl.id);
-                            }
-                        }
-                    }
+        // Collect resolved import FileIds (cheap — just u32 copies).
+        import_fids = fi
+            .imports
+            .iter()
+            .filter_map(|imp| imp.resolved_path.as_ref())
+            .filter_map(|p| st.interner.lookup(p))
+            .collect();
+    } else {
+        return None;
+    }
+    // Search imported files (no longer borrows fi).
+    for target_fid in import_fids {
+        if let Some(target_fi) = st.files.get(&target_fid) {
+            if let Some(decl) = find_top_level_by_name(target_fi, type_name) {
+                if is_member_bearing_kind(decl.kind) {
+                    return Some(decl.id);
                 }
             }
         }

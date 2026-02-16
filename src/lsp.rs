@@ -10,8 +10,8 @@ use crate::rename;
 use crate::solar_checker;
 use crate::symbol_table::SymbolTable;
 use crate::symbols;
-use crate::utils;
-use std::collections::HashMap;
+use crate::utils::{self, LineIndex};
+use rustc_hash::FxHashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -47,7 +47,7 @@ async fn ts_worker(
     ts_parser: Arc<tokio::sync::Mutex<TsParser>>,
     lint_engine: Arc<LintEngine>,
     symbol_table: Arc<RwLock<SymbolTable>>,
-    ts_diag_cache: Arc<RwLock<HashMap<String, Vec<Diagnostic>>>>,
+    ts_diag_cache: Arc<RwLock<FxHashMap<Url, Vec<Diagnostic>>>>,
 ) {
     while let Some(mut msg) = rx.recv().await {
         // Drain queued messages — only process the latest.
@@ -71,7 +71,7 @@ async fn ts_worker(
         // Cache tree-sitter diagnostics (moved, not cloned). (Fix #13)
         {
             let mut cache = ts_diag_cache.write().await;
-            cache.insert(msg.uri.to_string(), diags.clone());
+            cache.insert(msg.uri.clone(), diags.clone());
         }
         client
             .publish_diagnostics(msg.uri.clone(), diags, Some(msg.version))
@@ -84,8 +84,6 @@ async fn ts_worker(
             st.index_file_with_tree(&msg.file_path, &msg.text, &tree);
             st.resolve_file_references(&msg.file_path, &mut parser);
         }
-
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 }
 
@@ -93,7 +91,7 @@ async fn ts_worker(
 async fn solar_worker(
     mut rx: tokio::sync::mpsc::UnboundedReceiver<SolarWorkerMsg>,
     client: Client,
-    ts_diag_cache: Arc<RwLock<HashMap<String, Vec<Diagnostic>>>>,
+    ts_diag_cache: Arc<RwLock<FxHashMap<Url, Vec<Diagnostic>>>>,
     latest_seq: Arc<std::sync::atomic::AtomicU64>,
     symbol_table: Arc<RwLock<SymbolTable>>,
 ) {
@@ -132,19 +130,16 @@ async fn solar_worker(
         }
 
         // Merge with cached tree-sitter diagnostics.
-        let uri_str = msg.uri.to_string();
         let ts_diags = ts_diag_cache
             .read()
             .await
-            .get(&uri_str)
+            .get(&msg.uri)
             .cloned()
             .unwrap_or_default();
         let mut merged = ts_diags;
         merged.extend(solar_diags);
 
         client.publish_diagnostics(msg.uri, merged, None).await;
-
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
 }
 
@@ -156,14 +151,14 @@ pub struct SolLsp {
     client: Client,
     symbol_table: Arc<RwLock<SymbolTable>>,
     /// In-memory text buffers using Arc<str> for zero-copy sharing. (Fix #14)
-    text_cache: Arc<RwLock<HashMap<String, Arc<str>>>>,
+    text_cache: Arc<RwLock<FxHashMap<Url, Arc<str>>>>,
     ts_parser: Arc<tokio::sync::Mutex<TsParser>>,
     lint_engine: Arc<LintEngine>,
     ts_tx: tokio::sync::mpsc::UnboundedSender<TsWorkerMsg>,
     solar_tx: tokio::sync::mpsc::UnboundedSender<SolarWorkerMsg>,
     ts_rx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<TsWorkerMsg>>>>,
     solar_rx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<SolarWorkerMsg>>>>,
-    ts_diag_cache: Arc<RwLock<HashMap<String, Vec<Diagnostic>>>>,
+    ts_diag_cache: Arc<RwLock<FxHashMap<Url, Vec<Diagnostic>>>>,
     /// Monotonic sequence number for staleness detection. (Fix #2)
     seq: Arc<std::sync::atomic::AtomicU64>,
 }
@@ -173,10 +168,10 @@ impl SolLsp {
         // Use "." as placeholder; will be updated in initialize(). (Fix #25)
         let resolver = ImportResolver::new(std::path::Path::new("."));
         let symbol_table = Arc::new(RwLock::new(SymbolTable::new(resolver)));
-        let text_cache = Arc::new(RwLock::new(HashMap::new()));
+        let text_cache = Arc::new(RwLock::new(FxHashMap::default()));
         let ts_parser = Arc::new(tokio::sync::Mutex::new(TsParser::new()));
         let lint_engine = Arc::new(LintEngine::new());
-        let ts_diag_cache = Arc::new(RwLock::new(HashMap::new()));
+        let ts_diag_cache = Arc::new(RwLock::new(FxHashMap::default()));
 
         let (ts_tx, ts_rx) = tokio::sync::mpsc::unbounded_channel();
         let (solar_tx, solar_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -196,15 +191,16 @@ impl SolLsp {
         }
     }
 
-    async fn get_source_and_path(&self, uri: &Url) -> Option<(PathBuf, String)> {
+    async fn get_source_and_path(&self, uri: &Url) -> Option<(PathBuf, String, LineIndex)> {
         let file_path = uri.to_file_path().ok()?;
         let text_cache = self.text_cache.read().await;
-        let source = if let Some(cached) = text_cache.get(uri.as_str()) {
+        let source = if let Some(cached) = text_cache.get(uri) {
             cached.to_string()
         } else {
             std::fs::read_to_string(&file_path).ok()?
         };
-        Some((file_path, source))
+        let line_index = LineIndex::new(&source);
+        Some((file_path, source, line_index))
     }
 
     /// Send a file to both workers for processing. (Fix #24: text is Arc<str>)
@@ -340,7 +336,7 @@ impl LanguageServer for SolLsp {
             self.text_cache
                 .write()
                 .await
-                .insert(uri.to_string(), Arc::clone(&text));
+                .insert(uri.clone(), Arc::clone(&text));
             self.notify_workers(&uri, &file_path, &text, version);
         }
     }
@@ -354,7 +350,7 @@ impl LanguageServer for SolLsp {
             self.text_cache
                 .write()
                 .await
-                .insert(uri.to_string(), Arc::clone(&text));
+                .insert(uri.clone(), Arc::clone(&text));
             if let Ok(file_path) = uri.to_file_path() {
                 self.notify_workers(&uri, &file_path, &text, version);
             }
@@ -381,7 +377,7 @@ impl LanguageServer for SolLsp {
             self.text_cache
                 .write()
                 .await
-                .insert(uri.to_string(), Arc::clone(&text));
+                .insert(uri.clone(), Arc::clone(&text));
             self.notify_workers(&uri, &file_path, &text, 0);
         }
     }
@@ -389,9 +385,9 @@ impl LanguageServer for SolLsp {
     async fn will_save(&self, _params: WillSaveTextDocumentParams) {}
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
-        let uri_str = params.text_document.uri.to_string();
-        self.ts_diag_cache.write().await.remove(&uri_str);
-        self.text_cache.write().await.remove(&uri_str);
+        let uri = &params.text_document.uri;
+        self.ts_diag_cache.write().await.remove(uri);
+        self.text_cache.write().await.remove(uri);
         // Fix #7: also remove from symbol table.
         if let Ok(file_path) = params.text_document.uri.to_file_path() {
             self.symbol_table.write().await.remove_file(&file_path);
@@ -411,13 +407,13 @@ impl LanguageServer for SolLsp {
         let uri = &params.text_document_position_params.text_document.uri;
         let position = params.text_document_position_params.position;
 
-        let (file_path, source) = match self.get_source_and_path(uri).await {
+        let (file_path, source, line_index) = match self.get_source_and_path(uri).await {
             Some(v) => v,
             None => return Ok(None),
         };
 
         let st = self.symbol_table.read().await;
-        match goto::goto_definition(&st, &file_path, &source, position) {
+        match goto::goto_definition(&st, &file_path, &source, position, &line_index) {
             Some(loc) => Ok(Some(GotoDefinitionResponse::from(loc))),
             None => Ok(None),
         }
@@ -430,13 +426,13 @@ impl LanguageServer for SolLsp {
         let uri = &params.text_document_position_params.text_document.uri;
         let position = params.text_document_position_params.position;
 
-        let (file_path, source) = match self.get_source_and_path(uri).await {
+        let (file_path, source, line_index) = match self.get_source_and_path(uri).await {
             Some(v) => v,
             None => return Ok(None),
         };
 
         let st = self.symbol_table.read().await;
-        match goto::goto_definition(&st, &file_path, &source, position) {
+        match goto::goto_definition(&st, &file_path, &source, position, &line_index) {
             Some(loc) => Ok(Some(request::GotoDeclarationResponse::from(loc))),
             None => Ok(None),
         }
@@ -450,14 +446,20 @@ impl LanguageServer for SolLsp {
         let position = params.text_document_position.position;
         let include_declaration = params.context.include_declaration;
 
-        let (file_path, source) = match self.get_source_and_path(uri).await {
+        let (file_path, source, line_index) = match self.get_source_and_path(uri).await {
             Some(v) => v,
             None => return Ok(None),
         };
 
         let st = self.symbol_table.read().await;
-        let locations =
-            references::find_references(&st, &file_path, &source, position, include_declaration);
+        let locations = references::find_references(
+            &st,
+            &file_path,
+            &source,
+            position,
+            include_declaration,
+            &line_index,
+        );
         if locations.is_empty() {
             Ok(None)
         } else {
@@ -472,12 +474,12 @@ impl LanguageServer for SolLsp {
         let uri = &params.text_document.uri;
         let position = params.position;
 
-        let (_file_path, source) = match self.get_source_and_path(uri).await {
+        let (_file_path, source, line_index) = match self.get_source_and_path(uri).await {
             Some(v) => v,
             None => return Ok(None),
         };
 
-        match rename::get_identifier_range(&source, position) {
+        match rename::get_identifier_range(&source, position, &line_index) {
             Some(range) => Ok(Some(PrepareRenameResponse::Range(range))),
             None => Ok(None),
         }
@@ -491,15 +493,16 @@ impl LanguageServer for SolLsp {
         let position = params.text_document_position.position;
         let new_name = &params.new_name;
 
-        let (file_path, source) = match self.get_source_and_path(uri).await {
+        let (file_path, source, line_index) = match self.get_source_and_path(uri).await {
             Some(v) => v,
             None => return Ok(None),
         };
 
-        let current_identifier = match rename::get_identifier_at_position(&source, position) {
-            Some(id) => id,
-            None => return Ok(None),
-        };
+        let current_identifier =
+            match rename::get_identifier_at_position(&source, position, &line_index) {
+                Some(id) => id,
+                None => return Ok(None),
+            };
 
         if !utils::is_valid_solidity_identifier(new_name) {
             return Err(tower_lsp::jsonrpc::Error::invalid_params(
@@ -513,7 +516,12 @@ impl LanguageServer for SolLsp {
 
         let st = self.symbol_table.read().await;
         Ok(rename::rename_symbol(
-            &st, &file_path, &source, position, new_name,
+            &st,
+            &file_path,
+            &source,
+            position,
+            new_name,
+            &line_index,
         ))
     }
 
@@ -521,13 +529,19 @@ impl LanguageServer for SolLsp {
         let uri = &params.text_document_position_params.text_document.uri;
         let position = params.text_document_position_params.position;
 
-        let (file_path, source) = match self.get_source_and_path(uri).await {
+        let (file_path, source, line_index) = match self.get_source_and_path(uri).await {
             Some(v) => v,
             None => return Ok(None),
         };
 
         let st = self.symbol_table.read().await;
-        Ok(hover::hover_info(&st, &file_path, &source, position))
+        Ok(hover::hover_info(
+            &st,
+            &file_path,
+            &source,
+            position,
+            &line_index,
+        ))
     }
 
     async fn completion(
@@ -541,7 +555,7 @@ impl LanguageServer for SolLsp {
             .as_ref()
             .and_then(|c| c.trigger_character.as_deref());
 
-        let (file_path, source) = match self.get_source_and_path(uri).await {
+        let (file_path, source, line_index) = match self.get_source_and_path(uri).await {
             Some(v) => v,
             None => return Ok(None),
         };
@@ -553,6 +567,7 @@ impl LanguageServer for SolLsp {
             &source,
             position,
             trigger_char,
+            &line_index,
         ))
     }
 
@@ -562,13 +577,13 @@ impl LanguageServer for SolLsp {
     ) -> tower_lsp::jsonrpc::Result<Option<DocumentSymbolResponse>> {
         let uri = &params.text_document.uri;
 
-        let (file_path, source) = match self.get_source_and_path(uri).await {
+        let (file_path, source, line_index) = match self.get_source_and_path(uri).await {
             Some(v) => v,
             None => return Ok(None),
         };
 
         let st = self.symbol_table.read().await;
-        let symbols = symbols::document_symbols(&st, &file_path, &source);
+        let symbols = symbols::document_symbols(&st, &file_path, &source, &line_index);
         if symbols.is_empty() {
             Ok(None)
         } else {
@@ -595,13 +610,13 @@ impl LanguageServer for SolLsp {
     ) -> tower_lsp::jsonrpc::Result<Option<Vec<DocumentLink>>> {
         let uri = &params.text_document.uri;
 
-        let (file_path, source) = match self.get_source_and_path(uri).await {
+        let (file_path, source, line_index) = match self.get_source_and_path(uri).await {
             Some(v) => v,
             None => return Ok(None),
         };
 
         let st = self.symbol_table.read().await;
-        let links = links::document_links(&st, &file_path, &source);
+        let links = links::document_links(&st, &file_path, &source, &line_index);
         if links.is_empty() {
             Ok(None)
         } else {
