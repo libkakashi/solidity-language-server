@@ -87,7 +87,7 @@ fn solar_diag_to_lsp(
         return None;
     }
 
-    let range = span_to_range(source_map, span, target_file);
+    let range = span_to_range(source_map, span);
     let code: Option<NumberOrString> = diag
         .code
         .as_ref()
@@ -103,7 +103,7 @@ fn solar_diag_to_lsp(
 }
 
 /// Convert a solar span to an LSP range, respecting position encoding. (Fix #26)
-fn span_to_range(source_map: &SourceMap, span: Span, file_path: &Path) -> Range {
+fn span_to_range(source_map: &SourceMap, span: Span) -> Range {
     let lo = source_map.lookup_char_pos(span.lo());
     let hi = source_map.lookup_char_pos(span.hi());
 
@@ -119,25 +119,15 @@ fn span_to_range(source_map: &SourceMap, span: Span, file_path: &Path) -> Range 
             (lo.data.col.0 as u32, hi.data.col.0 as u32)
         }
         utils::PositionEncoding::Utf16 => {
-            // We need to convert byte-offset columns to UTF-16 code units.
-            // Read the file source to do the conversion.
-            match std::fs::read_to_string(file_path) {
-                Ok(source) => {
-                    let line_index = utils::LineIndex::new(&source);
-                    // Compute byte offset of lo position, then convert.
-                    let lo_byte =
-                        line_index.position_to_byte_offset(&source, lo_line, lo.data.col.0 as u32);
-                    let hi_byte =
-                        line_index.position_to_byte_offset(&source, hi_line, hi.data.col.0 as u32);
-                    let (_, lo_col) = line_index.byte_offset_to_position(&source, lo_byte);
-                    let (_, hi_col) = line_index.byte_offset_to_position(&source, hi_byte);
-                    (lo_col, hi_col)
-                }
-                Err(_) => {
-                    // Fall back to raw byte offsets if we can't read the file.
-                    (lo.data.col.0 as u32, hi.data.col.0 as u32)
-                }
-            }
+            // Use the source already loaded by solar (avoids redundant disk read).
+            let source = &*lo.file.src;
+            let line_index = utils::LineIndex::new(source);
+            // Compute byte offset of lo position, then convert.
+            let lo_byte = line_index.position_to_byte_offset(source, lo_line, lo.data.col.0 as u32);
+            let hi_byte = line_index.position_to_byte_offset(source, hi_line, hi.data.col.0 as u32);
+            let (_, lo_col) = line_index.byte_offset_to_position(source, lo_byte);
+            let (_, hi_col) = line_index.byte_offset_to_position(source, hi_byte);
+            (lo_col, hi_col)
         }
     };
 
