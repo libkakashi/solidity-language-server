@@ -7,7 +7,9 @@ use tower_lsp::lsp_types::{
 };
 
 use crate::parser::TsParser;
-use crate::symbol_table::{DeclKind, MemberInfo, ScopeKind, SymbolTable, SYNTHETIC_BASE};
+use crate::symbol_table::{
+    BUILTIN_GLOBALS, BUILTIN_TYPES, DeclKind, MemberInfo, SYNTHETIC_BASE, ScopeKind, SymbolTable,
+};
 use crate::utils::LineIndex;
 
 /// Handle a completion request.
@@ -95,10 +97,7 @@ fn is_in_comment_or_string(source: &str, byte_offset: usize) -> bool {
     // ranges [start, end), so checking at `byte_offset` exactly can miss the
     // end boundary of comment/string nodes.
     let check = byte_offset - 1;
-    let node = match tree
-        .root_node()
-        .descendant_for_byte_range(check, check)
-    {
+    let node = match tree.root_node().descendant_for_byte_range(check, check) {
         Some(n) => n,
         None => return false,
     };
@@ -106,7 +105,10 @@ fn is_in_comment_or_string(source: &str, byte_offset: usize) -> bool {
     let mut current = Some(node);
     while let Some(n) = current {
         match n.kind() {
-            "comment" | "string" | "string_literal" | "hex_string_literal"
+            "comment"
+            | "string"
+            | "string_literal"
+            | "hex_string_literal"
             | "unicode_string_literal" => return true,
             _ => {}
         }
@@ -176,8 +178,7 @@ fn get_dot_completions(
         ) {
             let all = st.all_members_of(&decl.name, file);
             if !all.is_empty() {
-                let mut items: Vec<CompletionItem> =
-                    all.iter().map(member_to_completion).collect();
+                let mut items: Vec<CompletionItem> = all.iter().map(member_to_completion).collect();
                 if let Some(ref tt) = decl.type_text {
                     append_using_for(st, file, scope, tt, &mut items);
                 }
@@ -186,8 +187,7 @@ fn get_dot_completions(
         }
         let members = decl.members();
         if !members.is_empty() {
-            let mut items: Vec<CompletionItem> =
-                members.iter().map(member_to_completion).collect();
+            let mut items: Vec<CompletionItem> = members.iter().map(member_to_completion).collect();
             // Also include using-for methods if the decl has a type.
             if let Some(ref tt) = decl.type_text {
                 append_using_for(st, file, scope, tt, &mut items);
@@ -310,7 +310,12 @@ fn this_completions(
         let mut base_decls = Vec::new();
         let mut base_seen = FxHashSet::default();
         for base_name in contract.base_contracts() {
-            st.collect_base_declarations_pub(fi.file_id, base_name, &mut base_decls, &mut base_seen);
+            st.collect_base_declarations_pub(
+                fi.file_id,
+                base_name,
+                &mut base_decls,
+                &mut base_seen,
+            );
         }
         for d in &base_decls {
             if d.kind == DeclKind::Function
@@ -700,72 +705,39 @@ fn make_type_items(pairs: &[(&str, &str)]) -> Vec<CompletionItem> {
 fn builtin_type_members(type_text: &str) -> Option<Vec<CompletionItem>> {
     let stripped = type_text.trim();
 
-    // Array types: anything containing `[`.
-    if stripped.contains('[') {
-        return Some(vec![
-            CompletionItem {
-                label: "length".to_string(),
-                kind: Some(CompletionItemKind::PROPERTY),
-                detail: Some("uint256".to_string()),
-                ..Default::default()
-            },
-            CompletionItem {
-                label: "push".to_string(),
-                kind: Some(CompletionItemKind::METHOD),
-                detail: Some("function".to_string()),
-                ..Default::default()
-            },
-            CompletionItem {
-                label: "pop".to_string(),
-                kind: Some(CompletionItemKind::METHOD),
-                detail: Some("function".to_string()),
-                ..Default::default()
-            },
-        ]);
-    }
+    // Map the type text to the builtin name used in BUILTIN_TYPES.
+    let builtin_name = if stripped.contains('[') {
+        "__builtin_array"
+    } else if stripped.strip_suffix(" payable").unwrap_or(stripped) == "address" {
+        "address"
+    } else {
+        return None;
+    };
 
-    // Address types.
-    let base = stripped
-        .strip_suffix(" payable")
-        .unwrap_or(stripped);
-    if base == "address" {
-        return Some(vec![
-            make_property("balance", "uint256"),
-            make_property("code", "bytes memory"),
-            make_property("codehash", "bytes32"),
-            make_method("transfer", "function(uint256)"),
-            make_method("send", "function(uint256) returns (bool)"),
-            make_method("call", "function(bytes memory) returns (bool, bytes memory)"),
-            make_method(
-                "delegatecall",
-                "function(bytes memory) returns (bool, bytes memory)",
-            ),
-            make_method(
-                "staticcall",
-                "function(bytes memory) returns (bool, bytes memory)",
-            ),
-        ]);
+    for &(name, _, members) in BUILTIN_TYPES {
+        if name == builtin_name {
+            return Some(
+                members
+                    .iter()
+                    .map(|&(label, detail, _)| {
+                        let kind = if detail.starts_with("function") {
+                            CompletionItemKind::METHOD
+                        } else {
+                            CompletionItemKind::PROPERTY
+                        };
+                        CompletionItem {
+                            label: label.to_string(),
+                            kind: Some(kind),
+                            detail: Some(detail.to_string()),
+                            ..Default::default()
+                        }
+                    })
+                    .collect(),
+            );
+        }
     }
 
     None
-}
-
-fn make_property(label: &str, detail: &str) -> CompletionItem {
-    CompletionItem {
-        label: label.to_string(),
-        kind: Some(CompletionItemKind::PROPERTY),
-        detail: Some(detail.to_string()),
-        ..Default::default()
-    }
-}
-
-fn make_method(label: &str, detail: &str) -> CompletionItem {
-    CompletionItem {
-        label: label.to_string(),
-        kind: Some(CompletionItemKind::METHOD),
-        detail: Some(detail.to_string()),
-        ..Default::default()
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1054,28 +1026,28 @@ fn extract_identifier_before_dot(line: &str, col_byte: u32) -> Option<String> {
     Some(String::from_utf8_lossy(&bytes[pos..end]).to_string())
 }
 
-/// Magic type member definitions (msg, block, tx, abi).
+/// Magic type member definitions (msg, block, tx, abi, bytes, string).
 fn magic_members(name: &str) -> Option<Vec<CompletionItem>> {
-    let items = match name {
-        "msg" => vec![
-            ("data", "bytes calldata"),
-            ("sender", "address"),
-            ("sig", "bytes4"),
-            ("value", "uint256"),
-        ],
-        "block" => vec![
-            ("basefee", "uint256"),
-            ("blobbasefee", "uint256"),
-            ("chainid", "uint256"),
-            ("coinbase", "address payable"),
-            ("difficulty", "uint256"),
-            ("gaslimit", "uint256"),
-            ("number", "uint256"),
-            ("prevrandao", "uint256"),
-            ("timestamp", "uint256"),
-        ],
-        "tx" => vec![("gasprice", "uint256"), ("origin", "address")],
-        "abi" => vec![
+    // Check shared builtin globals first (msg, block, tx).
+    for &(global_name, _, members) in BUILTIN_GLOBALS {
+        if global_name == name {
+            return Some(
+                members
+                    .iter()
+                    .map(|&(label, detail, _)| CompletionItem {
+                        label: label.to_string(),
+                        kind: Some(CompletionItemKind::PROPERTY),
+                        detail: Some(detail.to_string()),
+                        ..Default::default()
+                    })
+                    .collect(),
+            );
+        }
+    }
+
+    // Completion-only globals not in the symbol table.
+    let items: &[(&str, &str)] = match name {
+        "abi" => &[
             ("decode(bytes memory, (...))", "..."),
             ("encode(...)", "bytes memory"),
             ("encodePacked(...)", "bytes memory"),
@@ -1083,15 +1055,15 @@ fn magic_members(name: &str) -> Option<Vec<CompletionItem>> {
             ("encodeWithSignature(string memory, ...)", "bytes memory"),
             ("encodeCall(function, (...))", "bytes memory"),
         ],
-        "bytes" => vec![("concat(...)", "bytes memory")],
-        "string" => vec![("concat(...)", "string memory")],
+        "bytes" => &[("concat(...)", "bytes memory")],
+        "string" => &[("concat(...)", "string memory")],
         _ => return None,
     };
 
     Some(
         items
-            .into_iter()
-            .map(|(label, detail)| CompletionItem {
+            .iter()
+            .map(|&(label, detail)| CompletionItem {
                 label: label.to_string(),
                 kind: Some(CompletionItemKind::PROPERTY),
                 detail: Some(detail.to_string()),

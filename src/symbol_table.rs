@@ -13,50 +13,90 @@ type HashMap<K, V> = FxHashMap<K, V>;
 pub const SYNTHETIC_BASE: usize = usize::MAX - 1000;
 
 /// (global_name, offset, &[(member_name, type_text, member_offset)])
-type BuiltinDef = &'static [(&'static str, usize, &'static [(&'static str, &'static str, usize)])];
+pub type BuiltinDef = &'static [(
+    &'static str,
+    usize,
+    &'static [(&'static str, &'static str, usize)],
+)];
 
-const BUILTIN_GLOBALS: BuiltinDef = &[
-    ("msg", SYNTHETIC_BASE, &[
-        ("data", "bytes calldata", SYNTHETIC_BASE + 1),
-        ("sender", "address", SYNTHETIC_BASE + 2),
-        ("sig", "bytes4", SYNTHETIC_BASE + 3),
-        ("value", "uint256", SYNTHETIC_BASE + 4),
-    ]),
-    ("block", SYNTHETIC_BASE + 10, &[
-        ("basefee", "uint256", SYNTHETIC_BASE + 11),
-        ("blobbasefee", "uint256", SYNTHETIC_BASE + 12),
-        ("chainid", "uint256", SYNTHETIC_BASE + 13),
-        ("coinbase", "address payable", SYNTHETIC_BASE + 14),
-        ("difficulty", "uint256", SYNTHETIC_BASE + 15),
-        ("gaslimit", "uint256", SYNTHETIC_BASE + 16),
-        ("number", "uint256", SYNTHETIC_BASE + 17),
-        ("prevrandao", "uint256", SYNTHETIC_BASE + 18),
-        ("timestamp", "uint256", SYNTHETIC_BASE + 19),
-    ]),
-    ("tx", SYNTHETIC_BASE + 30, &[
-        ("gasprice", "uint256", SYNTHETIC_BASE + 31),
-        ("origin", "address", SYNTHETIC_BASE + 32),
-    ]),
+pub const BUILTIN_GLOBALS: BuiltinDef = &[
+    (
+        "msg",
+        SYNTHETIC_BASE,
+        &[
+            ("data", "bytes calldata", SYNTHETIC_BASE + 1),
+            ("sender", "address", SYNTHETIC_BASE + 2),
+            ("sig", "bytes4", SYNTHETIC_BASE + 3),
+            ("value", "uint256", SYNTHETIC_BASE + 4),
+        ],
+    ),
+    (
+        "block",
+        SYNTHETIC_BASE + 10,
+        &[
+            ("basefee", "uint256", SYNTHETIC_BASE + 11),
+            ("blobbasefee", "uint256", SYNTHETIC_BASE + 12),
+            ("chainid", "uint256", SYNTHETIC_BASE + 13),
+            ("coinbase", "address payable", SYNTHETIC_BASE + 14),
+            ("difficulty", "uint256", SYNTHETIC_BASE + 15),
+            ("gaslimit", "uint256", SYNTHETIC_BASE + 16),
+            ("number", "uint256", SYNTHETIC_BASE + 17),
+            ("prevrandao", "uint256", SYNTHETIC_BASE + 18),
+            ("timestamp", "uint256", SYNTHETIC_BASE + 19),
+        ],
+    ),
+    (
+        "tx",
+        SYNTHETIC_BASE + 30,
+        &[
+            ("gasprice", "uint256", SYNTHETIC_BASE + 31),
+            ("origin", "address", SYNTHETIC_BASE + 32),
+        ],
+    ),
 ];
 
 /// Built-in types — these are found via `find_type_declaration()` but NOT
 /// registered in scope 0 (they are types, not visible variables).
-const BUILTIN_TYPES: BuiltinDef = &[
-    ("address", SYNTHETIC_BASE + 100, &[
-        ("balance", "uint256", SYNTHETIC_BASE + 101),
-        ("code", "bytes memory", SYNTHETIC_BASE + 102),
-        ("codehash", "bytes32", SYNTHETIC_BASE + 103),
-        ("transfer", "function(uint256)", SYNTHETIC_BASE + 104),
-        ("send", "function(uint256) returns (bool)", SYNTHETIC_BASE + 105),
-        ("call", "function(bytes memory) returns (bool, bytes memory)", SYNTHETIC_BASE + 106),
-        ("delegatecall", "function(bytes memory) returns (bool, bytes memory)", SYNTHETIC_BASE + 107),
-        ("staticcall", "function(bytes memory) returns (bool, bytes memory)", SYNTHETIC_BASE + 108),
-    ]),
-    ("__builtin_array", SYNTHETIC_BASE + 200, &[
-        ("length", "uint256", SYNTHETIC_BASE + 201),
-        ("push", "function", SYNTHETIC_BASE + 202),
-        ("pop", "function", SYNTHETIC_BASE + 203),
-    ]),
+pub const BUILTIN_TYPES: BuiltinDef = &[
+    (
+        "address",
+        SYNTHETIC_BASE + 100,
+        &[
+            ("balance", "uint256", SYNTHETIC_BASE + 101),
+            ("code", "bytes memory", SYNTHETIC_BASE + 102),
+            ("codehash", "bytes32", SYNTHETIC_BASE + 103),
+            ("transfer", "function(uint256)", SYNTHETIC_BASE + 104),
+            (
+                "send",
+                "function(uint256) returns (bool)",
+                SYNTHETIC_BASE + 105,
+            ),
+            (
+                "call",
+                "function(bytes memory) returns (bool, bytes memory)",
+                SYNTHETIC_BASE + 106,
+            ),
+            (
+                "delegatecall",
+                "function(bytes memory) returns (bool, bytes memory)",
+                SYNTHETIC_BASE + 107,
+            ),
+            (
+                "staticcall",
+                "function(bytes memory) returns (bool, bytes memory)",
+                SYNTHETIC_BASE + 108,
+            ),
+        ],
+    ),
+    (
+        "__builtin_array",
+        SYNTHETIC_BASE + 200,
+        &[
+            ("length", "uint256", SYNTHETIC_BASE + 201),
+            ("push", "function", SYNTHETIC_BASE + 202),
+            ("pop", "function", SYNTHETIC_BASE + 203),
+        ],
+    ),
 ];
 
 // ---------------------------------------------------------------------------
@@ -519,20 +559,18 @@ impl SymbolTable {
         let mut cs = Some(scope_id);
         while let Some(sid) = cs {
             if let Some(scope) = fi.scopes.get(sid) {
-                if matches!(
-                    scope.kind,
-                    ScopeKind::Contract | ScopeKind::Interface
-                ) {
+                if matches!(scope.kind, ScopeKind::Contract | ScopeKind::Interface) {
                     for decl in fi.declarations.values() {
-                        if matches!(
-                            decl.kind,
-                            DeclKind::Contract | DeclKind::Interface
-                        ) && scope.range.0 >= decl.full_range.0
+                        if matches!(decl.kind, DeclKind::Contract | DeclKind::Interface)
+                            && scope.range.0 >= decl.full_range.0
                             && scope.range.1 <= decl.full_range.1
                         {
                             for base_name in decl.base_contracts() {
                                 self.collect_base_declarations(
-                                    file_id, base_name, &mut result, &mut seen,
+                                    file_id,
+                                    base_name,
+                                    &mut result,
+                                    &mut seen,
                                 );
                             }
                             break;
@@ -739,8 +777,8 @@ impl SymbolTable {
 
         // Find the scope of the base contract and add its declarations.
         for scope in &base_fi.scopes {
-            let in_range = scope.range.0 >= base_decl.full_range.0
-                && scope.range.1 <= base_decl.full_range.1;
+            let in_range =
+                scope.range.0 >= base_decl.full_range.0 && scope.range.1 <= base_decl.full_range.1;
             let is_ns = matches!(
                 scope.kind,
                 ScopeKind::Contract | ScopeKind::Interface | ScopeKind::Library
@@ -2892,8 +2930,7 @@ fn resolve_member(
                     let direct = match type_decl.kind {
                         DeclKind::Contract | DeclKind::Interface | DeclKind::Library => {
                             find_member_in_scope(st, &type_decl_id, member_name).or_else(|| {
-                                let base_names: Vec<String> =
-                                    type_decl.base_contracts().to_vec();
+                                let base_names: Vec<String> = type_decl.base_contracts().to_vec();
                                 for bn in &base_names {
                                     if let Some(found) = resolve_in_base_contract(
                                         st,
@@ -2991,8 +3028,7 @@ fn resolve_in_base_contract(
     let base_decl = st.get_declaration(&base_decl_id)?;
     let grandparent_names: Vec<String> = base_decl.base_contracts().to_vec();
     for gp_name in &grandparent_names {
-        if let Some(found) = resolve_in_base_contract(st, base_decl_id.file, gp_name, member_name)
-        {
+        if let Some(found) = resolve_in_base_contract(st, base_decl_id.file, gp_name, member_name) {
             return Some(found);
         }
     }
@@ -3196,18 +3232,10 @@ fn resolve_import_alias_member(
                             let container_kind = container_decl.kind;
                             let direct = match container_kind {
                                 DeclKind::Contract | DeclKind::Interface | DeclKind::Library => {
-                                    find_member_in_scope(
-                                        st,
-                                        &container_decl_id,
-                                        member_name,
-                                    )
+                                    find_member_in_scope(st, &container_decl_id, member_name)
                                 }
                                 DeclKind::Struct | DeclKind::Enum => {
-                                    find_member_by_decl_id(
-                                        st,
-                                        &container_decl_id,
-                                        member_name,
-                                    )
+                                    find_member_by_decl_id(st, &container_decl_id, member_name)
                                 }
                                 _ => None,
                             };
