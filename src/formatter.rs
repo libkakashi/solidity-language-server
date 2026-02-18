@@ -91,11 +91,6 @@ impl FormatBuffer {
         }
     }
 
-    #[allow(dead_code)]
-    fn would_exceed(&self, additional: usize) -> bool {
-        self.current_line_pos + additional > self.line_length
-    }
-
     fn finish(self) -> String {
         self.output
     }
