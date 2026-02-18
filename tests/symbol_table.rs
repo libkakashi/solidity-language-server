@@ -986,7 +986,9 @@ contract Foo {
     // (the call_struct_argument handler should skip it)
     let point_call_pos = source.find("{x: 1,").unwrap();
     let x_in_struct = fi.references.iter().find(|r| {
-        r.name(source) == "x" && r.range.0 > point_call_pos && r.range.0 < point_call_pos + 10
+        r.name(source) == "x"
+            && r.range.0 > point_call_pos as u32
+            && r.range.0 < (point_call_pos + 10) as u32
     });
     // Either there's no reference for the struct field name, or it should not
     // be resolved to the state variable

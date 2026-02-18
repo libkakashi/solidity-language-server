@@ -325,21 +325,27 @@ pub enum ImportKind {
 
 /// An identifier usage that may reference a declaration. (Fix #12)
 /// Stores byte range instead of an owned name String.
+/// Fields use u32 to halve memory — Solidity files never exceed 4 GB.
 #[derive(Debug, Clone)]
 pub struct Reference {
-    pub range: (usize, usize),
-    pub scope: ScopeId,
+    pub range: (u32, u32),
+    pub scope: u32,
     pub resolved: Option<DeclId>,
     /// If this reference is the property part of a qualified name (e.g. the
     /// `FeeUpdated` in `IFees.FeeUpdated`), this stores the index of the
     /// object/container reference in the same `FileIndex.references` vec.
-    pub member_of: Option<usize>,
+    pub member_of: Option<u32>,
 }
 
 impl Reference {
     /// Get the name from source text on demand instead of storing it.
     pub fn name<'a>(&self, source: &'a str) -> &'a str {
-        &source[self.range.0..self.range.1]
+        &source[self.range.0 as usize..self.range.1 as usize]
+    }
+
+    /// Get scope as usize (ScopeId).
+    pub fn scope(&self) -> ScopeId {
+        self.scope as usize
     }
 }
 
@@ -576,13 +582,14 @@ impl SymbolTable {
         }
 
         // Binary search on sorted reference range index.
+        let bo = byte_offset as u32;
         let ri = fi
             .ref_range_index
-            .partition_point(|&i| fi.references[i as usize].range.0 <= byte_offset);
+            .partition_point(|&i| fi.references[i as usize].range.0 <= bo);
         if ri > 0 {
             let ref_idx = fi.ref_range_index[ri - 1] as usize;
             let reference = &fi.references[ref_idx];
-            if reference.range.0 <= byte_offset && byte_offset < reference.range.1 {
+            if reference.range.0 <= bo && bo < reference.range.1 {
                 let decl_id = reference.resolved.as_ref()?;
                 return self.get_declaration(decl_id);
             }
@@ -1080,8 +1087,8 @@ fn walk_node(node: &Node, scope_id: ScopeId, file_id: FileId, source: &str, fi: 
                 let text = node_text(node, source);
                 if !text.is_empty() {
                     fi.references.push(Reference {
-                        range: (node.start_byte(), node.end_byte()),
-                        scope: scope_id,
+                        range: (node.start_byte() as u32, node.end_byte() as u32),
+                        scope: scope_id as u32,
                         resolved: None,
                         member_of: None,
                     });
@@ -1093,15 +1100,15 @@ fn walk_node(node: &Node, scope_id: ScopeId, file_id: FileId, source: &str, fi: 
             // multiple identifier children.  The first is the container, the
             // rest are members.
             let mut cursor = node.walk();
-            let mut prev_ref_idx: Option<usize> = None;
+            let mut prev_ref_idx: Option<u32> = None;
             if cursor.goto_first_child() {
                 loop {
                     let child = cursor.node();
                     if child.kind() == "identifier" {
-                        let idx = fi.references.len();
+                        let idx = fi.references.len() as u32;
                         fi.references.push(Reference {
-                            range: (child.start_byte(), child.end_byte()),
-                            scope: scope_id,
+                            range: (child.start_byte() as u32, child.end_byte() as u32),
+                            scope: scope_id as u32,
                             resolved: None,
                             member_of: prev_ref_idx,
                         });
@@ -1135,22 +1142,22 @@ fn walk_node(node: &Node, scope_id: ScopeId, file_id: FileId, source: &str, fi: 
                     let last = fi.references.len() - 1;
                     if last == obj_ref_start {
                         // Single ref pushed (simple identifier) — use it.
-                        Some(last)
+                        Some(last as u32)
                     } else if fi.references[last].member_of.is_some() {
                         // Last ref is a member/property — use it (chained access).
-                        Some(last)
+                        Some(last as u32)
                     } else {
                         // Multiple refs but last isn't a member (e.g. subscript
                         // index, function arg). Use the first ref which is the
                         // root variable.
-                        Some(obj_ref_start)
+                        Some(obj_ref_start as u32)
                     }
                 } else {
                     None
                 };
                 fi.references.push(Reference {
-                    range: (prop.start_byte(), prop.end_byte()),
-                    scope: scope_id,
+                    range: (prop.start_byte() as u32, prop.end_byte() as u32),
+                    scope: scope_id as u32,
                     resolved: None,
                     member_of: obj_ref_idx,
                 });
@@ -1273,8 +1280,11 @@ fn walk_contract(
                         loop {
                             if inner.node().kind() == "identifier" {
                                 fi.references.push(Reference {
-                                    range: (inner.node().start_byte(), inner.node().end_byte()),
-                                    scope: parent_scope,
+                                    range: (
+                                        inner.node().start_byte() as u32,
+                                        inner.node().end_byte() as u32,
+                                    ),
+                                    scope: parent_scope as u32,
                                     resolved: None,
                                     member_of: None,
                                 });
@@ -2560,8 +2570,8 @@ fn walk_modifier_invocations(node: &Node, scope_id: ScopeId, _source: &str, fi: 
                         let ic = inner.node();
                         if ic.kind() == "identifier" {
                             fi.references.push(Reference {
-                                range: (ic.start_byte(), ic.end_byte()),
-                                scope: scope_id,
+                                range: (ic.start_byte() as u32, ic.end_byte() as u32),
+                                scope: scope_id as u32,
                                 resolved: None,
                                 member_of: None,
                             });
@@ -2710,7 +2720,15 @@ fn resolve_references(st: &mut SymbolTable, file_id: FileId) {
             .iter()
             .enumerate()
             .filter(|(_, r)| r.resolved.is_none())
-            .map(|(i, r)| (i, r.range.0, r.range.1, r.scope, r.member_of))
+            .map(|(i, r)| {
+                (
+                    i,
+                    r.range.0 as usize,
+                    r.range.1 as usize,
+                    r.scope as usize,
+                    r.member_of.map(|m| m as usize),
+                )
+            })
             .collect();
         (unresolved, source)
     };
@@ -2880,9 +2898,10 @@ fn resolve_member(
             Some(id) => id,
             None => {
                 // Container unresolved — check for "super".
-                let scope = container_ref.scope;
+                let scope = container_ref.scope();
                 let source = st.sources.get(&file_id)?;
-                let ref_text = &source[container_ref.range.0..container_ref.range.1];
+                let ref_text =
+                    &source[container_ref.range.0 as usize..container_ref.range.1 as usize];
                 if ref_text == "super" {
                     return resolve_super_member(st, file_id, scope, member_name);
                 }
