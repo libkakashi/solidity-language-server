@@ -1174,3 +1174,100 @@ contract Calculator {
         "Should show function signature, got: {text}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Built-in globals (msg, block, tx) hover tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn hover_on_msg_sender() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Token {
+    function getOwner() public view returns (address) {
+        return msg.sender;
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    // Hover on "sender" in "msg.sender"
+    let pos = source.find("msg.sender").unwrap() + "msg.".len();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col));
+    assert!(text.is_some(), "Should show hover for msg.sender");
+    let text = text.unwrap();
+    assert!(
+        text.contains("address"),
+        "Should show address type, got: {text}"
+    );
+    assert!(
+        text.contains("sender"),
+        "Should show sender name, got: {text}"
+    );
+}
+
+#[test]
+fn hover_on_block_timestamp() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Timer {
+    function getTime() public view returns (uint256) {
+        return block.timestamp;
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    // Hover on "timestamp" in "block.timestamp"
+    let pos = source.find("block.timestamp").unwrap() + "block.".len();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col));
+    assert!(text.is_some(), "Should show hover for block.timestamp");
+    let text = text.unwrap();
+    assert!(
+        text.contains("uint256"),
+        "Should show uint256 type, got: {text}"
+    );
+    assert!(
+        text.contains("timestamp"),
+        "Should show timestamp name, got: {text}"
+    );
+}
+
+#[test]
+fn hover_on_tx_gasprice() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract GasInfo {
+    function getGasPrice() public view returns (uint256) {
+        return tx.gasprice;
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    // Hover on "gasprice" in "tx.gasprice"
+    let pos = source.find("tx.gasprice").unwrap() + "tx.".len();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col));
+    assert!(text.is_some(), "Should show hover for tx.gasprice");
+    let text = text.unwrap();
+    assert!(
+        text.contains("uint256"),
+        "Should show uint256 type, got: {text}"
+    );
+    assert!(
+        text.contains("gasprice"),
+        "Should show gasprice name, got: {text}"
+    );
+}

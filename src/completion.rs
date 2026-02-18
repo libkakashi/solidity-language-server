@@ -6,7 +6,7 @@ use tower_lsp::lsp_types::{
 };
 
 use crate::parser::TsParser;
-use crate::symbol_table::{DeclKind, MemberInfo, ScopeKind, SymbolTable};
+use crate::symbol_table::{DeclKind, MemberInfo, ScopeKind, SymbolTable, SYNTHETIC_BASE};
 use crate::utils::LineIndex;
 
 /// Handle a completion request.
@@ -749,6 +749,7 @@ fn get_general_completions(
 
     let mut items: Vec<CompletionItem> = visible
         .iter()
+        .filter(|decl| decl.id.byte_offset < SYNTHETIC_BASE)
         .map(|decl| CompletionItem {
             label: decl.name.clone(),
             kind: Some(decl_kind_to_completion_kind(decl.kind)),

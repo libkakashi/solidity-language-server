@@ -6,7 +6,7 @@ use tower_lsp::lsp_types::{
     DocumentSymbol, Location, Position, Range, SymbolInformation, SymbolKind, Url,
 };
 
-use crate::symbol_table::{DeclKind, Declaration, FileIndex, ScopeKind, SymbolTable};
+use crate::symbol_table::{DeclKind, Declaration, FileIndex, ScopeKind, SymbolTable, SYNTHETIC_BASE};
 use crate::utils::LineIndex;
 
 /// Extract document symbols for a single file (hierarchical tree).
@@ -24,7 +24,7 @@ pub fn document_symbols(
     let mut top_level = Vec::new();
 
     for decl in fi.declarations.values() {
-        if decl.scope != 0 {
+        if decl.scope != 0 || decl.id.byte_offset >= SYNTHETIC_BASE {
             continue;
         }
         match decl.kind {
@@ -79,7 +79,9 @@ pub fn workspace_symbols(st: &SymbolTable, query: &str) -> Vec<SymbolInformation
             if !query_lower.is_empty() && !decl.name.to_lowercase().contains(&query_lower) {
                 continue;
             }
-            if matches!(decl.kind, DeclKind::Parameter | DeclKind::LocalVariable) {
+            if matches!(decl.kind, DeclKind::Parameter | DeclKind::LocalVariable)
+                || decl.id.byte_offset >= SYNTHETIC_BASE
+            {
                 continue;
             }
 

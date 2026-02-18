@@ -9,6 +9,34 @@ use crate::parser::TsParser;
 
 type HashMap<K, V> = FxHashMap<K, V>;
 
+/// Base offset for synthetic built-in declarations. Real files never approach this.
+pub const SYNTHETIC_BASE: usize = usize::MAX - 1000;
+
+/// (global_name, offset, &[(member_name, type_text, member_offset)])
+const BUILTIN_GLOBALS: &[(&str, usize, &[(&str, &str, usize)])] = &[
+    ("msg", SYNTHETIC_BASE, &[
+        ("data", "bytes calldata", SYNTHETIC_BASE + 1),
+        ("sender", "address", SYNTHETIC_BASE + 2),
+        ("sig", "bytes4", SYNTHETIC_BASE + 3),
+        ("value", "uint256", SYNTHETIC_BASE + 4),
+    ]),
+    ("block", SYNTHETIC_BASE + 10, &[
+        ("basefee", "uint256", SYNTHETIC_BASE + 11),
+        ("blobbasefee", "uint256", SYNTHETIC_BASE + 12),
+        ("chainid", "uint256", SYNTHETIC_BASE + 13),
+        ("coinbase", "address payable", SYNTHETIC_BASE + 14),
+        ("difficulty", "uint256", SYNTHETIC_BASE + 15),
+        ("gaslimit", "uint256", SYNTHETIC_BASE + 16),
+        ("number", "uint256", SYNTHETIC_BASE + 17),
+        ("prevrandao", "uint256", SYNTHETIC_BASE + 18),
+        ("timestamp", "uint256", SYNTHETIC_BASE + 19),
+    ]),
+    ("tx", SYNTHETIC_BASE + 30, &[
+        ("gasprice", "uint256", SYNTHETIC_BASE + 31),
+        ("origin", "address", SYNTHETIC_BASE + 32),
+    ]),
+];
+
 // ---------------------------------------------------------------------------
 // Path interning — every file gets a small integer FileId instead of
 // duplicating PathBuf everywhere.  (Fix #10)
@@ -739,6 +767,9 @@ fn build_file_index(
     for imp in &mut fi.imports {
         imp.resolved_path = resolver.resolve(&imp.source_path, file_path);
     }
+
+    // Inject synthetic declarations for built-in globals (msg, block, tx).
+    inject_builtin_globals(&mut fi);
 
     fi
 }
@@ -1953,6 +1984,64 @@ fn create_scope(
         declarations: Vec::new(),
     });
     id
+}
+
+fn inject_builtin_globals(fi: &mut FileIndex) {
+    for &(global_name, global_offset, members_data) in BUILTIN_GLOBALS {
+        let mut members = Vec::with_capacity(members_data.len());
+        for &(mname, mtype, moffset) in members_data {
+            let member_decl_id = DeclId {
+                file: fi.file_id,
+                byte_offset: moffset,
+            };
+            let member_decl = Declaration {
+                id: member_decl_id,
+                name: mname.to_string(),
+                kind: DeclKind::StateVariable,
+                full_range: (moffset, moffset),
+                name_range: (moffset, moffset),
+                scope: 0,
+                type_text: Some(mtype.to_string()),
+                visibility: None,
+                state_mutability: None,
+                is_constant: false,
+                is_immutable: false,
+                natspec: None,
+                extras: None,
+            };
+            fi.declarations.insert(member_decl_id, member_decl);
+            members.push(MemberInfo {
+                name: mname.to_string(),
+                type_text: mtype.to_string(),
+                kind: DeclKind::StateVariable,
+                name_range: (moffset, moffset),
+                decl_id: Some(member_decl_id),
+            });
+        }
+
+        let global_decl_id = DeclId {
+            file: fi.file_id,
+            byte_offset: global_offset,
+        };
+        let mut global_decl = Declaration {
+            id: global_decl_id,
+            name: global_name.to_string(),
+            kind: DeclKind::Struct,
+            full_range: (global_offset, global_offset),
+            name_range: (global_offset, global_offset),
+            scope: 0,
+            type_text: None,
+            visibility: None,
+            state_mutability: None,
+            is_constant: false,
+            is_immutable: false,
+            natspec: None,
+            extras: None,
+        };
+        global_decl.extras_mut().members = members;
+        fi.declarations.insert(global_decl_id, global_decl);
+        register_in_scope(fi, 0, global_name, &global_decl_id);
+    }
 }
 
 fn register_in_scope(fi: &mut FileIndex, scope_id: ScopeId, name: &str, decl_id: &DeclId) {
