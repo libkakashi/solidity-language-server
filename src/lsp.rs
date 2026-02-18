@@ -5,6 +5,7 @@ use crate::formatter;
 use crate::goto;
 use crate::hover;
 use crate::import_resolver::ImportResolver;
+use crate::inlay_hints;
 use crate::links;
 use crate::lint::LintEngine;
 use crate::parser::{self, TsParser};
@@ -331,6 +332,7 @@ impl LanguageServer for SolLsp {
                         },
                     ),
                 ),
+                inlay_hint_provider: Some(OneOf::Left(true)),
                 document_formatting_provider: Some(OneOf::Left(true)),
                 text_document_sync: Some(TextDocumentSyncCapability::Options(
                     TextDocumentSyncOptions {
@@ -801,6 +803,36 @@ impl LanguageServer for SolLsp {
             Ok(None)
         } else {
             Ok(Some(actions))
+        }
+    }
+
+    async fn inlay_hint(
+        &self,
+        params: InlayHintParams,
+    ) -> tower_lsp::jsonrpc::Result<Option<Vec<InlayHint>>> {
+        let uri = &params.text_document.uri;
+        let range = params.range;
+
+        let (file_path, source, line_index) = match self.get_source_and_path(uri).await {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+
+        let cached_tree = self.tree_cache.read().await.get(uri).cloned();
+
+        let st = self.symbol_table.read().await;
+        let hints = inlay_hints::inlay_hints(
+            &st,
+            &file_path,
+            &source,
+            range,
+            &line_index,
+            cached_tree.as_ref(),
+        );
+        if hints.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(hints))
         }
     }
 

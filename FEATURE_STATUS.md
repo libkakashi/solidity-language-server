@@ -16,8 +16,8 @@
 | Hover | **Y** | **Y** | - |
 | Go to Definition | **Y** | **Y** | - |
 | Go to Declaration | **Y** | **N** | - |
-| Go to Type Definition | **N** | **Y** | **High** |
-| Go to Implementation | **N** | **Y** | **High** |
+| Go to Type Definition | **Y** | **Y** | ~~High~~ Done |
+| Go to Implementation | **Y** | **Y** | ~~High~~ Done |
 | Find References | **Y** | **Y** | - |
 | Document Symbols | **Y** | **Y** | - |
 | Workspace Symbols | **Y** | **N** | - |
@@ -42,8 +42,8 @@
 - [x] 1. Code Actions / Quick Fixes — 7 lint-driven auto-fixes
 - [x] 2. Signature Help — parameter tracking on `(` and `,`
 - [x] 3. Semantic Tokens — 13 token types, 4 modifiers
-- [ ] 4. Go to Type Definition — variable → type navigation
-- [ ] 5. Go to Implementation — interface → concrete impl
+- [x] 4. Go to Type Definition — variable → type navigation
+- [x] 5. Go to Implementation — interface → concrete impl
 - [ ] 6. Inlay Hints — parameter names, type annotations
 - [ ] 7. Document Highlight — same-symbol highlighting
 - [ ] 8. Folding Ranges — collapse functions, contracts, blocks

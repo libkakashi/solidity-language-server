@@ -5,6 +5,7 @@ pub mod formatter;
 pub mod goto;
 pub mod hover;
 pub mod import_resolver;
+pub mod inlay_hints;
 pub mod links;
 pub mod lint;
 pub mod lsp;
