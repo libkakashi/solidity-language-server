@@ -19,6 +19,11 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tower_lsp::{Client, LanguageServer, lsp_types::*};
 
+thread_local! {
+    /// Reusable TsParser for formatting (avoids re-allocating per request).
+    static FMT_PARSER: std::cell::RefCell<TsParser> = std::cell::RefCell::new(TsParser::new());
+}
+
 // ---------------------------------------------------------------------------
 // Worker message types
 // ---------------------------------------------------------------------------
@@ -673,8 +678,8 @@ impl LanguageServer for SolLsp {
 
         // Run formatting on a blocking thread (CPU-bound work).
         let formatted = tokio::task::spawn_blocking(move || {
-            let mut parser = TsParser::new();
-            let tree = match parser.parse(&source, None) {
+            let tree = FMT_PARSER.with_borrow_mut(|parser| parser.parse(&source, None));
+            let tree = match tree {
                 Some(t) => t,
                 None => return None,
             };
