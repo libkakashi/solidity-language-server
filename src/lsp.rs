@@ -46,12 +46,13 @@ struct SolarWorkerMsg {
 async fn ts_worker(
     mut rx: tokio::sync::mpsc::UnboundedReceiver<TsWorkerMsg>,
     client: Client,
-    ts_parser: Arc<tokio::sync::Mutex<TsParser>>,
     lint_engine: Arc<LintEngine>,
     symbol_table: Arc<RwLock<SymbolTable>>,
     ts_diag_cache: Arc<RwLock<FxHashMap<Url, Vec<Diagnostic>>>>,
     tree_cache: Arc<RwLock<FxHashMap<Url, tree_sitter::Tree>>>,
 ) {
+    let mut parser = TsParser::new();
+
     while let Some(mut msg) = rx.recv().await {
         // Drain queued messages — only process the latest.
         while let Ok(newer) = rx.try_recv() {
@@ -59,12 +60,9 @@ async fn ts_worker(
         }
 
         // Parse once. (Fix #1)
-        let tree = {
-            let mut parser = ts_parser.lock().await;
-            match parser.parse(&msg.text, None) {
-                Some(t) => t,
-                None => continue,
-            }
+        let tree = match parser.parse(&msg.text, None) {
+            Some(t) => t,
+            None => continue,
         };
 
         // Cache parsed tree for use by completion (avoids re-parsing).
@@ -88,7 +86,6 @@ async fn ts_worker(
 
         // Re-index symbol table using the same tree. (Fix #1)
         {
-            let mut parser = ts_parser.lock().await;
             let mut st = symbol_table.write().await;
             st.index_file_with_tree(&msg.file_path, &msg.text, &tree);
             st.resolve_file_references(&msg.file_path, &mut parser);
@@ -163,7 +160,6 @@ pub struct SolLsp {
     text_cache: Arc<RwLock<FxHashMap<Url, (Arc<str>, Arc<LineIndex>)>>>,
     /// Cached parse trees from ts_worker (avoids re-parsing for completion).
     tree_cache: Arc<RwLock<FxHashMap<Url, tree_sitter::Tree>>>,
-    ts_parser: Arc<tokio::sync::Mutex<TsParser>>,
     lint_engine: Arc<LintEngine>,
     ts_tx: tokio::sync::mpsc::UnboundedSender<TsWorkerMsg>,
     solar_tx: tokio::sync::mpsc::UnboundedSender<SolarWorkerMsg>,
@@ -182,7 +178,6 @@ impl SolLsp {
         let symbol_table = Arc::new(RwLock::new(SymbolTable::new(resolver)));
         let text_cache = Arc::new(RwLock::new(FxHashMap::default()));
         let tree_cache = Arc::new(RwLock::new(FxHashMap::default()));
-        let ts_parser = Arc::new(tokio::sync::Mutex::new(TsParser::new()));
         let lint_engine = Arc::new(LintEngine::new());
         let ts_diag_cache = Arc::new(RwLock::new(FxHashMap::default()));
 
@@ -194,7 +189,6 @@ impl SolLsp {
             symbol_table,
             text_cache,
             tree_cache,
-            ts_parser,
             lint_engine,
             ts_tx,
             solar_tx,
@@ -326,7 +320,6 @@ impl LanguageServer for SolLsp {
             tokio::spawn(ts_worker(
                 ts_rx,
                 self.client.clone(),
-                self.ts_parser.clone(),
                 self.lint_engine.clone(),
                 self.symbol_table.clone(),
                 self.ts_diag_cache.clone(),
