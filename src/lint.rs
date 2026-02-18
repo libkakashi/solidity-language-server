@@ -5,7 +5,7 @@ use tree_sitter::{Node, Query, QueryCursor, StreamingIterator, Tree};
 // Lint rule definition
 // ---------------------------------------------------------------------------
 
-type FilterFn = fn(rule: &LintRule, source: &str, captures: &[(String, Node)]) -> Option<LintHit>;
+type FilterFn = fn(rule: &LintRule, source: &str, captures: &[(&str, Node)]) -> Option<LintHit>;
 
 struct LintRule {
     id: &'static str,
@@ -54,11 +54,11 @@ impl LintEngine {
             let mut matches = cursor.matches(&rule.query, tree.root_node(), source.as_bytes());
 
             while let Some(m) = matches.next() {
-                let captures: Vec<(String, Node)> = m
+                let captures: Vec<(&str, Node)> = m
                     .captures
                     .iter()
                     .map(|c| {
-                        let name = rule.query.capture_names()[c.index as usize].to_string();
+                        let name = rule.query.capture_names()[c.index as usize];
                         (name, c.node)
                     })
                     .collect();
@@ -102,10 +102,10 @@ impl LintEngine {
     }
 }
 
-fn find_capture<'a>(captures: &'a [(String, Node<'a>)], name: &str) -> Option<Node<'a>> {
+fn find_capture<'a>(captures: &'a [(&str, Node<'a>)], name: &str) -> Option<Node<'a>> {
     captures
         .iter()
-        .find(|(n, _)| n == name)
+        .find(|(n, _)| *n == name)
         .map(|(_, node)| *node)
 }
 
@@ -203,7 +203,7 @@ fn decl_has_immutable(node: Node) -> bool {
 fn filter_incorrect_shift(
     _rule: &LintRule,
     source: &str,
-    captures: &[(String, Node)],
+    captures: &[(&str, Node)],
 ) -> Option<LintHit> {
     let expr = find_capture(captures, "expr")?;
     let literal = find_capture(captures, "literal")?;
@@ -224,7 +224,7 @@ fn filter_incorrect_shift(
 fn filter_divide_before_multiply(
     _rule: &LintRule,
     source: &str,
-    captures: &[(String, Node)],
+    captures: &[(&str, Node)],
 ) -> Option<LintHit> {
     let outer = find_capture(captures, "outer")?;
     let left_subtree = find_capture(captures, "left_subtree")?;
@@ -285,7 +285,7 @@ fn has_operator(binary_expr: Node, source: &str, op: &str) -> bool {
 fn filter_pascal_case_struct(
     _rule: &LintRule,
     source: &str,
-    captures: &[(String, Node)],
+    captures: &[(&str, Node)],
 ) -> Option<LintHit> {
     let name_node = find_capture(captures, "name")?;
     let name = node_text(name_node, source);
@@ -302,7 +302,7 @@ fn filter_pascal_case_struct(
 fn filter_mixed_case_function(
     _rule: &LintRule,
     source: &str,
-    captures: &[(String, Node)],
+    captures: &[(&str, Node)],
 ) -> Option<LintHit> {
     let name_node = find_capture(captures, "name")?;
     let name = node_text(name_node, source);
@@ -327,7 +327,7 @@ fn filter_mixed_case_function(
 fn filter_mixed_case_variable(
     _rule: &LintRule,
     source: &str,
-    captures: &[(String, Node)],
+    captures: &[(&str, Node)],
 ) -> Option<LintHit> {
     let decl = find_capture(captures, "decl")?;
     let name_node = find_capture(captures, "name")?;
@@ -350,7 +350,7 @@ fn filter_mixed_case_variable(
 fn filter_screaming_snake_const(
     _rule: &LintRule,
     source: &str,
-    captures: &[(String, Node)],
+    captures: &[(&str, Node)],
 ) -> Option<LintHit> {
     let decl = find_capture(captures, "decl")?;
     let name_node = find_capture(captures, "name")?;
@@ -373,7 +373,7 @@ fn filter_screaming_snake_const(
 fn filter_screaming_snake_immutable(
     _rule: &LintRule,
     source: &str,
-    captures: &[(String, Node)],
+    captures: &[(&str, Node)],
 ) -> Option<LintHit> {
     let name_node = find_capture(captures, "name")?;
     let name = node_text(name_node, source);
@@ -390,7 +390,7 @@ fn filter_screaming_snake_immutable(
 fn filter_unaliased_plain_import(
     _rule: &LintRule,
     source: &str,
-    captures: &[(String, Node)],
+    captures: &[(&str, Node)],
 ) -> Option<LintHit> {
     let import_node = find_capture(captures, "import")?;
     let path_node = find_capture(captures, "path")?;
@@ -419,7 +419,7 @@ fn filter_unaliased_plain_import(
 fn filter_unsafe_cheatcode(
     _rule: &LintRule,
     source: &str,
-    captures: &[(String, Node)],
+    captures: &[(&str, Node)],
 ) -> Option<LintHit> {
     let call = find_capture(captures, "call")?;
     let method = find_capture(captures, "method")?;
@@ -435,7 +435,7 @@ fn filter_unsafe_cheatcode(
 fn filter_custom_errors(
     _rule: &LintRule,
     _source: &str,
-    captures: &[(String, Node)],
+    captures: &[(&str, Node)],
 ) -> Option<LintHit> {
     let call = find_capture(captures, "call")?;
 
@@ -518,11 +518,11 @@ fn check_unused_imports(
     let mut matches = cursor.matches(&rule.query, tree.root_node(), source.as_bytes());
     let mut imports: Vec<(String, usize, usize)> = Vec::new();
     while let Some(m) = matches.next() {
-        let captures: Vec<(String, Node)> = m
+        let captures: Vec<(&str, Node)> = m
             .captures
             .iter()
             .map(|c| {
-                let name = rule.query.capture_names()[c.index as usize].to_string();
+                let name = rule.query.capture_names()[c.index as usize];
                 (name, c.node)
             })
             .collect();
