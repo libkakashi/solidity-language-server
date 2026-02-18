@@ -29,7 +29,7 @@
 | Document Highlight | **Y** | **N** | ~~Medium~~ Done |
 | Document Links | **Y** | **N** | - |
 | Folding Ranges | **Y** | **N** | ~~Medium~~ Done |
-| Selection Ranges | **N** | **N** | Low |
+| Selection Ranges | **Y** | **N** | ~~Low~~ Done |
 | Semantic Tokens | **Y** (13 types) | **Y** | ~~High~~ Done |
 | Inlay Hints | **Y** (param names) | **N** | ~~High~~ Done |
 | Call Hierarchy | **Y** | **N** | ~~Medium~~ Done |
@@ -50,7 +50,7 @@
 - [x] 9. Call Hierarchy — incoming/outgoing call navigation
 - [x] 10. Type Hierarchy — contract inheritance tree
 - [x] 11. Code Lens — reference/implementation counts
-- [ ] 12. Selection Ranges — smart expand/shrink selection
+- [x] 12. Selection Ranges — smart expand/shrink selection
 
 ## Solidity-Specific Features
 
