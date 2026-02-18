@@ -1,12 +1,13 @@
 use solidity_language_server::lint::LintEngine;
 use solidity_language_server::parser::TsParser;
+use solidity_language_server::utils::LineIndex;
 
 /// Helper: parse source with tree-sitter and run lint engine, return diagnostics.
 fn lint(source: &str) -> Vec<tower_lsp::lsp_types::Diagnostic> {
     let mut parser = TsParser::new();
     let tree = parser.parse(source, None).expect("parse failed");
     let engine = LintEngine::new();
-    engine.run(&tree, source)
+    engine.run(&tree, source, &LineIndex::new(source))
 }
 
 #[test]

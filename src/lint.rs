@@ -39,8 +39,12 @@ impl LintEngine {
         Self { rules }
     }
 
-    pub fn run(&self, tree: &Tree, source: &str) -> Vec<Diagnostic> {
-        let line_index = crate::utils::LineIndex::new(source);
+    pub fn run(
+        &self,
+        tree: &Tree,
+        source: &str,
+        line_index: &crate::utils::LineIndex,
+    ) -> Vec<Diagnostic> {
         let mut diagnostics = Vec::new();
         // Reuse a single QueryCursor across rules. (Fix #20)
         let mut cursor = QueryCursor::new();
@@ -70,7 +74,7 @@ impl LintEngine {
                             hit.start_byte,
                             hit.end_byte,
                             source,
-                            &line_index,
+                            line_index,
                             &hit.message,
                         ));
                     }
@@ -81,7 +85,7 @@ impl LintEngine {
                             node.start_byte(),
                             node.end_byte(),
                             source,
-                            &line_index,
+                            line_index,
                             rule.description,
                         ));
                     }
@@ -95,7 +99,7 @@ impl LintEngine {
             source,
             &self.rules,
             &mut cursor,
-            &line_index,
+            line_index,
         ));
 
         diagnostics
@@ -745,7 +749,8 @@ mod tests {
         let mut parser = TsParser::new();
         let tree = parser.parse(source, None).unwrap();
         let engine = LintEngine::new();
-        engine.run(&tree, source)
+        let line_index = crate::utils::LineIndex::new(source);
+        engine.run(&tree, source, &line_index)
     }
 
     fn lint_ids(source: &str) -> Vec<String> {

@@ -76,9 +76,12 @@ async fn ts_worker(
             .await
             .insert(msg.uri.clone(), tree.clone());
 
+        // Build line index once for both parse errors and lint.
+        let line_index = crate::utils::LineIndex::new(&msg.text);
+
         // Lint from the parsed tree.
-        let mut diags = parser::collect_parse_errors(&tree, &msg.text);
-        diags.extend(lint_engine.run(&tree, &msg.text));
+        let mut diags = parser::collect_parse_errors(&tree, &msg.text, &line_index);
+        diags.extend(lint_engine.run(&tree, &msg.text, &line_index));
 
         // Cache tree-sitter diagnostics (moved, not cloned). (Fix #13)
         {

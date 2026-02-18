@@ -1,4 +1,5 @@
 use solidity_language_server::parser::{TsParser, collect_parse_errors};
+use solidity_language_server::utils::LineIndex;
 
 #[test]
 fn parse_valid_contract_no_errors() {
@@ -25,7 +26,7 @@ contract Counter {
     let tree = parser.parse(source, None);
     assert!(tree.is_some(), "Should parse valid Solidity");
     let tree = tree.unwrap();
-    let errors = collect_parse_errors(&tree, source);
+    let errors = collect_parse_errors(&tree, source, &LineIndex::new(source));
     assert!(
         errors.is_empty(),
         "Valid code should have no parse errors, got: {:?}",
@@ -51,7 +52,7 @@ contract Bad {
         "Tree-sitter should still produce a tree for invalid code"
     );
     let tree = tree.unwrap();
-    let errors = collect_parse_errors(&tree, source);
+    let errors = collect_parse_errors(&tree, source, &LineIndex::new(source));
     assert!(
         !errors.is_empty(),
         "Should report parse errors for invalid syntax"
@@ -64,7 +65,7 @@ fn parse_empty_source() {
     let tree = parser.parse("", None);
     assert!(tree.is_some(), "Should parse empty source");
     let tree = tree.unwrap();
-    let errors = collect_parse_errors(&tree, "");
+    let errors = collect_parse_errors(&tree, "", &LineIndex::new(""));
     assert!(errors.is_empty(), "Empty source should have no errors");
 }
 
@@ -131,7 +132,7 @@ contract MyToken is IERC20, Ownable {
     let tree = parser.parse(source, None);
     assert!(tree.is_some());
     let tree = tree.unwrap();
-    let errors = collect_parse_errors(&tree, source);
+    let errors = collect_parse_errors(&tree, source, &LineIndex::new(source));
     assert!(
         errors.is_empty(),
         "Complex valid contract should have no parse errors, got: {:?}",
@@ -149,7 +150,7 @@ fn parse_errors_have_correct_source() {
 "#;
     let mut parser = TsParser::new();
     let tree = parser.parse(source, None).unwrap();
-    let errors = collect_parse_errors(&tree, source);
+    let errors = collect_parse_errors(&tree, source, &LineIndex::new(source));
     assert!(!errors.is_empty(), "Should detect parse error");
     // All errors should have source "ts-parse"
     for err in &errors {

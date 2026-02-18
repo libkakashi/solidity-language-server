@@ -21,11 +21,10 @@ impl TsParser {
     }
 }
 
-pub fn collect_parse_errors(tree: &Tree, source: &str) -> Vec<Diagnostic> {
-    let line_index = LineIndex::new(source);
+pub fn collect_parse_errors(tree: &Tree, source: &str, line_index: &LineIndex) -> Vec<Diagnostic> {
     let mut errors = Vec::new();
     let mut cursor = tree.walk();
-    walk_errors(&mut cursor, source, &line_index, &mut errors);
+    walk_errors(&mut cursor, source, line_index, &mut errors);
     errors
 }
 
