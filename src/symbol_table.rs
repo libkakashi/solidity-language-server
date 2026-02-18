@@ -362,6 +362,8 @@ pub struct FileIndex {
     ref_range_index: Vec<u32>,
     /// Indices into `scopes`, sorted by range.0 for binary search in find_scope_at.
     scope_range_index: Vec<u32>,
+    /// Top-level name → DeclId for O(1) lookup in find_top_level_by_name.
+    top_level_names: HashMap<String, DeclId>,
 }
 
 impl FileIndex {
@@ -385,6 +387,34 @@ impl FileIndex {
         let mut scope_indices: Vec<u32> = (0..self.scopes.len() as u32).collect();
         scope_indices.sort_unstable_by_key(|&i| self.scopes[i as usize].range.0);
         self.scope_range_index = scope_indices;
+
+        // Build top-level name index.
+        self.top_level_names.clear();
+        // File scope (scope 0) declarations.
+        if let Some(scope) = self.scopes.first() {
+            for (name, id) in &scope.declarations {
+                self.top_level_names.insert(name.clone(), *id);
+            }
+        }
+        // Declarations at scope 0 not captured by the scope's own vec.
+        for decl in self.declarations.values() {
+            if decl.scope == 0 {
+                self.top_level_names
+                    .entry(decl.name.clone())
+                    .or_insert(decl.id);
+            }
+        }
+        // Contract/interface/library-level scope declarations.
+        for scope in &self.scopes {
+            if matches!(
+                scope.kind,
+                ScopeKind::Contract | ScopeKind::Interface | ScopeKind::Library
+            ) {
+                for (name, id) in &scope.declarations {
+                    self.top_level_names.entry(name.clone()).or_insert(*id);
+                }
+            }
+        }
     }
 }
 
@@ -929,6 +959,7 @@ fn build_file_index(
         decl_name_ranges: Vec::new(),
         ref_range_index: Vec::new(),
         scope_range_index: Vec::new(),
+        top_level_names: Default::default(),
     };
 
     // Create file-level scope.
@@ -2643,30 +2674,8 @@ fn find_scope_at(fi: &FileIndex, byte_offset: usize) -> Option<ScopeId> {
 }
 
 fn find_top_level_by_name<'a>(fi: &'a FileIndex, name: &str) -> Option<&'a Declaration> {
-    // Search file scope (scope 0) first.
-    if let Some(scope) = fi.scopes.first() {
-        if let Some(decl_id) = scope.get_decl(name) {
-            return fi.declarations.get(decl_id);
-        }
-    }
-    // Also search inside contracts.
-    for decl in fi.declarations.values() {
-        if decl.name == name && decl.scope == 0 {
-            return Some(decl);
-        }
-    }
-    // Search in contract-level scopes.
-    for scope in &fi.scopes {
-        if matches!(
-            scope.kind,
-            ScopeKind::Contract | ScopeKind::Interface | ScopeKind::Library
-        ) {
-            if let Some(decl_id) = scope.get_decl(name) {
-                return fi.declarations.get(decl_id);
-            }
-        }
-    }
-    None
+    let id = fi.top_level_names.get(name)?;
+    fi.declarations.get(id)
 }
 
 // ---------------------------------------------------------------------------
