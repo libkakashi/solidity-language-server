@@ -153,7 +153,9 @@ impl DisableTracker {
     /// Check if a byte offset falls within a disabled range. (#12: binary search)
     fn is_disabled(&self, byte_offset: usize) -> bool {
         // Find the last range whose start <= byte_offset.
-        let idx = self.ranges.partition_point(|&(start, _)| start <= byte_offset);
+        let idx = self
+            .ranges
+            .partition_point(|&(start, _)| start <= byte_offset);
         if idx == 0 {
             return false;
         }
@@ -242,7 +244,7 @@ impl<'a> Formatter<'a> {
             "using_directive" => self.write_verbatim_reindented(node),
             "user_defined_type_definition" => self.write_verbatim_reindented(node),
             "contract_body" => self.format_contract_body(node),
-            "function_body" => self.format_function_body(node),
+            "function_body" => self.format_block(node),
             "block_statement" => self.format_block(node),
             // statement is a supertype wrapper
             "statement" => {
@@ -603,7 +605,10 @@ impl<'a> Formatter<'a> {
             if child.is_named() {
                 match child.kind() {
                     "parameter" => params.push(child),
-                    "visibility" | "state_mutability" | "virtual" | "modifier_invocation"
+                    "visibility"
+                    | "state_mutability"
+                    | "virtual"
+                    | "modifier_invocation"
                     | "override_specifier" => modifiers.push(child),
                     _ => {}
                 }
@@ -630,7 +635,7 @@ impl<'a> Formatter<'a> {
 
         if let Some(body_node) = body {
             self.buf.write_space();
-            self.format_function_body(body_node);
+            self.format_block(body_node);
         } else {
             self.buf.write_token(";");
         }
@@ -670,7 +675,7 @@ impl<'a> Formatter<'a> {
 
         if let Some(body_node) = body {
             self.buf.write_space();
-            self.format_function_body(body_node);
+            self.format_block(body_node);
         }
     }
 
@@ -721,7 +726,7 @@ impl<'a> Formatter<'a> {
 
         if let Some(body_node) = body {
             self.buf.write_space();
-            self.format_function_body(body_node);
+            self.format_block(body_node);
         } else {
             self.buf.write_token(";");
         }
@@ -749,7 +754,10 @@ impl<'a> Formatter<'a> {
             }
             match child.kind() {
                 "parameter" => params.push(child),
-                "visibility" | "state_mutability" | "virtual" | "modifier_invocation"
+                "visibility"
+                | "state_mutability"
+                | "virtual"
+                | "modifier_invocation"
                 | "override_specifier" => modifiers.push(child),
                 _ => {}
             }
@@ -767,7 +775,7 @@ impl<'a> Formatter<'a> {
 
         if let Some(body_node) = body {
             self.buf.write_space();
-            self.format_function_body(body_node);
+            self.format_block(body_node);
         } else {
             self.buf.write_token(";");
         }
@@ -804,30 +812,6 @@ impl<'a> Formatter<'a> {
     // -----------------------------------------------------------------------
     // Function / block bodies
     // -----------------------------------------------------------------------
-
-    /// #9: Use named_child_count() + direct iteration.
-    fn format_function_body(&mut self, node: Node) {
-        self.buf.write_token("{");
-
-        if node.named_child_count() == 0 {
-            self.buf.write_token("}");
-            return;
-        }
-
-        self.buf.write_newline();
-        self.buf.indent();
-
-        let mut cursor = node.walk();
-        for stmt in node.named_children(&mut cursor) {
-            self.buf.write_indent();
-            self.format_node(stmt);
-            self.buf.write_newline();
-        }
-
-        self.buf.dedent();
-        self.buf.write_indent();
-        self.buf.write_token("}");
-    }
 
     /// #9: Use named_child_count() + direct iteration.
     fn format_block(&mut self, node: Node) {
@@ -1840,8 +1824,9 @@ contract Foo {
     }
 }"#;
         let result = fmt(source);
-        assert!(result
-            .contains("function bar(uint256 a, uint256 b) public pure returns (uint256)"));
+        assert!(
+            result.contains("function bar(uint256 a, uint256 b) public pure returns (uint256)")
+        );
     }
 
     #[test]
@@ -1851,7 +1836,10 @@ contract Foo {
     uint public x;
 }"#;
         let result = fmt(source);
-        assert!(result.contains("uint256"), "Expected uint256, got:\n{result}");
+        assert!(
+            result.contains("uint256"),
+            "Expected uint256, got:\n{result}"
+        );
     }
 
     #[test]
@@ -1894,9 +1882,15 @@ contract Foo {
 
     #[test]
     fn test_int_type_transform() {
-        assert_eq!(transform_int_type("uint", IntTypes::Long).as_ref(), "uint256");
+        assert_eq!(
+            transform_int_type("uint", IntTypes::Long).as_ref(),
+            "uint256"
+        );
         assert_eq!(transform_int_type("int", IntTypes::Long).as_ref(), "int256");
-        assert_eq!(transform_int_type("uint256", IntTypes::Short).as_ref(), "uint");
+        assert_eq!(
+            transform_int_type("uint256", IntTypes::Short).as_ref(),
+            "uint"
+        );
         assert_eq!(
             transform_int_type("uint128", IntTypes::Short).as_ref(),
             "uint128"
