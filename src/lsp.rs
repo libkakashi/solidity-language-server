@@ -1,3 +1,4 @@
+use crate::call_hierarchy;
 use crate::code_actions;
 use crate::completion;
 use crate::document_highlight;
@@ -336,6 +337,7 @@ impl LanguageServer for SolLsp {
                         },
                     ),
                 ),
+                call_hierarchy_provider: Some(CallHierarchyServerCapability::Simple(true)),
                 inlay_hint_provider: Some(OneOf::Left(true)),
                 document_formatting_provider: Some(OneOf::Left(true)),
                 text_document_sync: Some(TextDocumentSyncCapability::Options(
@@ -850,6 +852,54 @@ impl LanguageServer for SolLsp {
             Ok(None)
         } else {
             Ok(Some(actions))
+        }
+    }
+
+    async fn prepare_call_hierarchy(
+        &self,
+        params: CallHierarchyPrepareParams,
+    ) -> tower_lsp::jsonrpc::Result<Option<Vec<CallHierarchyItem>>> {
+        let uri = &params.text_document_position_params.text_document.uri;
+        let position = params.text_document_position_params.position;
+
+        let (file_path, source, line_index) = match self.get_source_and_path(uri).await {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+
+        let st = self.symbol_table.read().await;
+        Ok(call_hierarchy::prepare(
+            &st,
+            &file_path,
+            &source,
+            position,
+            &line_index,
+        ))
+    }
+
+    async fn incoming_calls(
+        &self,
+        params: CallHierarchyIncomingCallsParams,
+    ) -> tower_lsp::jsonrpc::Result<Option<Vec<CallHierarchyIncomingCall>>> {
+        let st = self.symbol_table.read().await;
+        let calls = call_hierarchy::incoming_calls(&st, &params.item);
+        if calls.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(calls))
+        }
+    }
+
+    async fn outgoing_calls(
+        &self,
+        params: CallHierarchyOutgoingCallsParams,
+    ) -> tower_lsp::jsonrpc::Result<Option<Vec<CallHierarchyOutgoingCall>>> {
+        let st = self.symbol_table.read().await;
+        let calls = call_hierarchy::outgoing_calls(&st, &params.item);
+        if calls.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(calls))
         }
     }
 
