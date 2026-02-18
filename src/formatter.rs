@@ -239,8 +239,8 @@ impl<'a> Formatter<'a> {
             }
             "struct_declaration" => self.format_struct(node),
             "enum_declaration" => self.format_enum(node),
-            "event_definition" => self.format_event(node),
-            "error_declaration" => self.format_error(node),
+            "event_definition" => self.format_event_or_error(node, "event", "event_parameter"),
+            "error_declaration" => self.format_event_or_error(node, "error", "error_parameter"),
             "using_directive" => self.write_verbatim_reindented(node),
             "user_defined_type_definition" => self.write_verbatim_reindented(node),
             "contract_body" => self.format_contract_body(node),
@@ -972,9 +972,10 @@ impl<'a> Formatter<'a> {
         }
     }
 
-    fn format_event(&mut self, node: Node) {
+    fn format_event_or_error(&mut self, node: Node, keyword: &str, param_kind: &str) {
+        let is_event = keyword == "event";
         let mut cursor = node.walk();
-        let mut first = true;
+        let mut past_keyword = !is_event;
         for child in node.children(&mut cursor) {
             let text = self.node_text(child);
             match text {
@@ -982,49 +983,25 @@ impl<'a> Formatter<'a> {
                 "(" => self.buf.write_token("("),
                 ")" => self.buf.write_token(")"),
                 "," => self.buf.write_token(", "),
-                "event" => {
-                    self.buf.write_token("event ");
-                    first = false;
+                kw if kw == keyword => {
+                    self.buf.write_token(keyword);
+                    self.buf.write_token(" ");
+                    past_keyword = true;
                 }
-                "anonymous" => {
+                "anonymous" if is_event => {
                     self.buf.write_token(" anonymous");
                 }
                 _ => {
                     if child.is_named() {
                         match child.kind() {
                             "identifier" => self.buf.write_token(self.node_text(child)),
-                            "event_parameter" => self.write_verbatim(child),
+                            k if k == param_kind => self.write_verbatim(child),
                             _ => self.format_node(child),
                         }
-                    } else if !first {
+                    } else if past_keyword {
                         self.buf.write_token(text);
                     }
-                    first = false;
-                }
-            }
-        }
-    }
-
-    fn format_error(&mut self, node: Node) {
-        let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            let text = self.node_text(child);
-            match text {
-                ";" => self.buf.write_token(";"),
-                "(" => self.buf.write_token("("),
-                ")" => self.buf.write_token(")"),
-                "," => self.buf.write_token(", "),
-                "error" => self.buf.write_token("error "),
-                _ => {
-                    if child.is_named() {
-                        match child.kind() {
-                            "identifier" => self.buf.write_token(self.node_text(child)),
-                            "error_parameter" => self.write_verbatim(child),
-                            _ => self.format_node(child),
-                        }
-                    } else {
-                        self.buf.write_token(text);
-                    }
+                    past_keyword = true;
                 }
             }
         }
