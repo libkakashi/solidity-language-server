@@ -1,4 +1,4 @@
-use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Range};
+use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity};
 use tree_sitter::{Parser, Tree, TreeCursor};
 
 use crate::utils::LineIndex;
@@ -37,7 +37,7 @@ fn walk_errors(
 ) {
     let node = cursor.node();
     if node.is_error() || node.is_missing() {
-        let range = node_to_lsp_range(node.start_byte(), node.end_byte(), source, line_index);
+        let range = line_index.byte_range_to_lsp_range(source, node.start_byte(), node.end_byte());
         errors.push(Diagnostic {
             range,
             severity: Some(DiagnosticSeverity::ERROR),
@@ -59,13 +59,4 @@ fn walk_errors(
         }
         cursor.goto_parent();
     }
-}
-
-pub fn node_to_lsp_range(
-    start_byte: usize,
-    end_byte: usize,
-    source: &str,
-    line_index: &LineIndex,
-) -> Range {
-    line_index.byte_range_to_lsp_range(source, start_byte, end_byte)
 }

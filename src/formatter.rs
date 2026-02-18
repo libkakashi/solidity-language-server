@@ -16,7 +16,6 @@ struct FormatBuffer {
     indent_unit: String,
     /// Full indent for the current level, cached to avoid recomputing.
     cached_indent: String,
-    line_length: usize,
 }
 
 impl FormatBuffer {
@@ -28,7 +27,6 @@ impl FormatBuffer {
             current_line_pos: 0,
             indent_unit: config.indent_string(),
             cached_indent: String::new(),
-            line_length: config.line_length,
         }
     }
 

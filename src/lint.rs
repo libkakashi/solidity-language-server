@@ -1,8 +1,6 @@
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, NumberOrString};
 use tree_sitter::{Node, Query, QueryCursor, StreamingIterator, Tree};
 
-use crate::parser::node_to_lsp_range;
-
 // ---------------------------------------------------------------------------
 // Lint rule definition
 // ---------------------------------------------------------------------------
@@ -123,7 +121,7 @@ fn make_diagnostic(
     line_index: &crate::utils::LineIndex,
     message: &str,
 ) -> Diagnostic {
-    let range = node_to_lsp_range(start_byte, end_byte, source, line_index);
+    let range = line_index.byte_range_to_lsp_range(source, start_byte, end_byte);
     Diagnostic {
         range,
         severity: Some(rule.severity),
@@ -548,7 +546,7 @@ fn check_unused_imports(
     for (name, start_byte, end_byte) in &imports {
         if !used_names.contains(name.as_str()) {
             diagnostics.push(Diagnostic {
-                range: node_to_lsp_range(*start_byte, *end_byte, source, line_index),
+                range: line_index.byte_range_to_lsp_range(source, *start_byte, *end_byte),
                 severity: Some(rule.severity),
                 code: Some(NumberOrString::String(rule.id.to_string())),
                 source: Some("ts-lint".into()),
