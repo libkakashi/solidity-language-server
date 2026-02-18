@@ -488,7 +488,8 @@ impl SymbolTable {
         let file_id = self.interner.get_or_intern(path);
         self.clear_refs_for_file(file_id);
 
-        let file_index = build_file_index(file_id, source, &tree.root_node(), &self.resolver, path);
+        let file_index =
+            build_file_index(file_id, source, &tree.root_node(), &mut self.resolver, path);
         self.files.insert(file_id, file_index);
         self.sources.insert(file_id, Arc::from(source));
     }
@@ -498,7 +499,8 @@ impl SymbolTable {
         let file_id = self.interner.get_or_intern(path);
         self.clear_refs_for_file(file_id);
 
-        let file_index = build_file_index(file_id, source, &tree.root_node(), &self.resolver, path);
+        let file_index =
+            build_file_index(file_id, source, &tree.root_node(), &mut self.resolver, path);
         self.files.insert(file_id, file_index);
         self.sources.insert(file_id, Arc::from(source));
     }
@@ -785,8 +787,7 @@ impl SymbolTable {
             decl.kind,
             DeclKind::Contract | DeclKind::Interface | DeclKind::Library
         ) {
-            let base_names: Vec<String> = decl.base_contracts().to_vec();
-            for base_name in &base_names {
+            for base_name in decl.base_contracts() {
                 self.collect_all_members(decl_id.file, base_name, result, seen_names, visited);
             }
         }
@@ -876,8 +877,7 @@ impl SymbolTable {
         }
 
         // Recursively add from grandparent bases.
-        let grandparent_names: Vec<String> = base_decl.base_contracts().to_vec();
-        for gp_name in &grandparent_names {
+        for gp_name in base_decl.base_contracts() {
             self.collect_base_declarations_inner(base_decl_id.file, gp_name, result, seen, visited);
         }
     }
@@ -937,7 +937,7 @@ fn build_file_index(
     file_id: FileId,
     source: &str,
     root: &Node,
-    resolver: &ImportResolver,
+    resolver: &mut ImportResolver,
     file_path: &Path,
 ) -> FileIndex {
     let mut fi = FileIndex {
@@ -2886,8 +2886,7 @@ fn resolve_member(
             find_member_in_scope(st, &container_decl_id, member_name)
                 .or_else(|| {
                     // Search inherited members from base contracts.
-                    let base_names: Vec<String> = container_decl.base_contracts().to_vec();
-                    for base_name in &base_names {
+                    for base_name in container_decl.base_contracts() {
                         if let Some(found) =
                             resolve_in_base_contract(st, container_file, base_name, member_name)
                         {
@@ -2932,8 +2931,7 @@ fn resolve_member(
                 let direct = match type_decl.kind {
                     DeclKind::Contract | DeclKind::Interface | DeclKind::Library => {
                         find_member_in_scope(st, &type_decl_id, member_name).or_else(|| {
-                            let base_names: Vec<String> = type_decl.base_contracts().to_vec();
-                            for base_name in &base_names {
+                            for base_name in type_decl.base_contracts() {
                                 if let Some(found) = resolve_in_base_contract(
                                     st,
                                     type_decl_id.file,
@@ -2971,8 +2969,7 @@ fn resolve_member(
                     let direct = match type_decl.kind {
                         DeclKind::Contract | DeclKind::Interface | DeclKind::Library => {
                             find_member_in_scope(st, &type_decl_id, member_name).or_else(|| {
-                                let base_names: Vec<String> = type_decl.base_contracts().to_vec();
-                                for bn in &base_names {
+                                for bn in type_decl.base_contracts() {
                                     if let Some(found) = resolve_in_base_contract(
                                         st,
                                         type_decl_id.file,
@@ -3058,8 +3055,7 @@ fn resolve_in_base_contract(
     }
     // Recurse through grandparent bases.
     let base_decl = st.get_declaration(&base_decl_id)?;
-    let grandparent_names: Vec<String> = base_decl.base_contracts().to_vec();
-    for gp_name in &grandparent_names {
+    for gp_name in base_decl.base_contracts() {
         if let Some(found) = resolve_in_base_contract(st, base_decl_id.file, gp_name, member_name) {
             return Some(found);
         }

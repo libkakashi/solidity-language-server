@@ -14,6 +14,8 @@ pub struct ImportResolver {
     remappings: Vec<ImportRemapping>,
     include_paths: Vec<PathBuf>,
     source_map: Arc<SourceMap>,
+    /// Cache of resolved import paths: (import_path, from_dir) → result.
+    resolve_cache: std::collections::HashMap<(String, PathBuf), Option<PathBuf>>,
 }
 
 impl ImportResolver {
@@ -35,6 +37,7 @@ impl ImportResolver {
             remappings,
             include_paths,
             source_map,
+            resolve_cache: std::collections::HashMap::new(),
         }
     }
 
@@ -56,8 +59,14 @@ impl ImportResolver {
     ///
     /// `import_path` is the raw string from `import "..."` (without quotes).
     /// `from_file` is the absolute path of the file containing the import.
-    pub fn resolve(&self, import_path: &str, from_file: &Path) -> Option<PathBuf> {
+    pub fn resolve(&mut self, import_path: &str, from_file: &Path) -> Option<PathBuf> {
         let import_path = import_path.trim_matches(|c| c == '"' || c == '\'');
+        let from_dir = from_file.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let key = (import_path.to_string(), from_dir);
+
+        if let Some(cached) = self.resolve_cache.get(&key) {
+            return cached.clone();
+        }
 
         let mut resolver = FileResolver::new(&self.source_map);
 
@@ -71,10 +80,13 @@ impl ImportResolver {
         resolver.add_include_paths(self.include_paths.iter().cloned());
 
         let result = resolver.resolve_file(Path::new(import_path), Some(from_file));
-        match result {
+        let resolved = match result {
             Ok(source_file) => source_file.name.as_real().map(|p| p.to_path_buf()),
             Err(_) => None,
-        }
+        };
+
+        self.resolve_cache.insert(key, resolved.clone());
+        resolved
     }
 }
 
@@ -264,7 +276,7 @@ mod tests {
         fs::write(&foo, "").unwrap();
         fs::write(&bar, "").unwrap();
 
-        let resolver = ImportResolver::with_root(tmp.path().to_path_buf());
+        let mut resolver = ImportResolver::with_root(tmp.path().to_path_buf());
         let resolved = resolver.resolve("./Bar.sol", &foo).unwrap();
         assert!(
             resolved.ends_with("src/Bar.sol"),
@@ -287,7 +299,7 @@ remappings = ["@oz/=lib/oz/"]
         fs::create_dir_all(tmp.path().join("src")).unwrap();
         fs::write(&from_file, "").unwrap();
 
-        let resolver = ImportResolver::with_root(tmp.path().to_path_buf());
+        let mut resolver = ImportResolver::with_root(tmp.path().to_path_buf());
         let resolved = resolver
             .resolve("@oz/contracts/Token.sol", &from_file)
             .unwrap();
@@ -312,7 +324,7 @@ remappings = ["@oz/=lib/oz/"]
         fs::create_dir_all(tmp.path().join("src")).unwrap();
         fs::write(&from_file, "").unwrap();
 
-        let resolver = ImportResolver::with_root(tmp.path().to_path_buf());
+        let mut resolver = ImportResolver::with_root(tmp.path().to_path_buf());
         let resolved = resolver.resolve("forge-std/Test.sol", &from_file).unwrap();
         assert!(
             resolved.ends_with("lib/forge-std/src/Test.sol"),
@@ -332,7 +344,7 @@ remappings = ["@oz/=lib/oz/"]
         fs::create_dir_all(tmp.path().join("contracts")).unwrap();
         fs::write(&from_file, "").unwrap();
 
-        let resolver = ImportResolver::with_root(tmp.path().to_path_buf());
+        let mut resolver = ImportResolver::with_root(tmp.path().to_path_buf());
         let resolved = resolver
             .resolve("@openzeppelin/contracts/ERC20.sol", &from_file)
             .unwrap();
