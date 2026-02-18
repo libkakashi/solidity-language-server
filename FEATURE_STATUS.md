@@ -33,7 +33,7 @@
 | Semantic Tokens | **Y** (13 types) | **Y** | ~~High~~ Done |
 | Inlay Hints | **Y** (param names) | **N** | ~~High~~ Done |
 | Call Hierarchy | **Y** | **N** | ~~Medium~~ Done |
-| Type Hierarchy | **N** | **N** | Medium |
+| Type Hierarchy | **Y** | **N** | ~~Medium~~ Done |
 | Workspace Folders | **P** (empty handler) | **Y** | Medium |
 | Workspace Configuration | **P** (empty handler) | **Y** | Medium |
 
@@ -48,7 +48,7 @@
 - [x] 7. Document Highlight — same-symbol highlighting
 - [x] 8. Folding Ranges — collapse functions, contracts, blocks
 - [x] 9. Call Hierarchy — incoming/outgoing call navigation
-- [ ] 10. Type Hierarchy — contract inheritance tree
+- [x] 10. Type Hierarchy — contract inheritance tree
 - [ ] 11. Code Lens — reference/implementation counts
 - [ ] 12. Selection Ranges — smart expand/shrink selection
 

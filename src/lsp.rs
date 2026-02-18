@@ -1,5 +1,6 @@
 use crate::call_hierarchy;
 use crate::code_actions;
+use crate::code_lens;
 use crate::completion;
 use crate::document_highlight;
 use crate::fmt_config::{self, FmtConfig};
@@ -326,6 +327,9 @@ impl LanguageServer for SolLsp {
                 folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
                 document_highlight_provider: Some(OneOf::Left(true)),
                 code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
+                code_lens_provider: Some(CodeLensOptions {
+                    resolve_provider: Some(false),
+                }),
                 semantic_tokens_provider: Some(
                     SemanticTokensServerCapabilities::SemanticTokensOptions(
                         SemanticTokensOptions {
@@ -853,6 +857,26 @@ impl LanguageServer for SolLsp {
             Ok(None)
         } else {
             Ok(Some(actions))
+        }
+    }
+
+    async fn code_lens(
+        &self,
+        params: CodeLensParams,
+    ) -> tower_lsp::jsonrpc::Result<Option<Vec<CodeLens>>> {
+        let uri = &params.text_document.uri;
+
+        let (file_path, source, line_index) = match self.get_source_and_path(uri).await {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+
+        let st = self.symbol_table.read().await;
+        let lenses = code_lens::code_lens(&st, &file_path, &source, &line_index);
+        if lenses.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(lenses))
         }
     }
 
