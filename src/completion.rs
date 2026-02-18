@@ -380,21 +380,36 @@ fn super_completions(
     source: &str,
     cursor_byte: usize,
 ) -> Vec<CompletionItem> {
-    if let Some(contract) = find_enclosing_contract(st, file, scope) {
-        let mut items = Vec::new();
-        let mut seen = FxHashSet::default();
-        for base_name in contract.base_contracts() {
-            for m in &st.all_members_of(base_name, file) {
-                if seen.insert(m.name.clone()) {
-                    items.push(member_to_completion(m));
-                }
+    // Try scope-based approach first, fall back to text-based extraction.
+    let base_names: Vec<String> = if let Some(contract) = find_enclosing_contract(st, file, scope) {
+        contract
+            .base_contracts()
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    } else {
+        extract_base_contracts_from_text(&source[..cursor_byte]).unwrap_or_default()
+    };
+
+    collect_base_member_completions(st, file, &base_names)
+}
+
+/// Collect deduplicated completions for all members of the given base contracts.
+fn collect_base_member_completions(
+    st: &SymbolTable,
+    file: &Path,
+    base_names: &[String],
+) -> Vec<CompletionItem> {
+    let mut items = Vec::new();
+    let mut seen = FxHashSet::default();
+    for base_name in base_names {
+        for m in &st.all_members_of(base_name, file) {
+            if seen.insert(m.name.clone()) {
+                items.push(member_to_completion(m));
             }
         }
-        return items;
     }
-
-    // Fallback: find base contract names from text, look up their members.
-    super_completions_fallback(st, file, source, cursor_byte)
+    items
 }
 
 /// Walk the scope chain to find the enclosing contract/interface declaration.
@@ -463,33 +478,6 @@ fn this_completions_fallback(
             ..Default::default()
         })
         .collect()
-}
-
-/// Fallback for `super.` when parse errors prevent scope-based lookup.
-/// Extracts base contract names from the source text and looks up their
-/// members (including grandparent) in the symbol table.
-fn super_completions_fallback(
-    st: &SymbolTable,
-    file: &Path,
-    source: &str,
-    cursor_byte: usize,
-) -> Vec<CompletionItem> {
-    let before = &source[..cursor_byte];
-    // Find the innermost "contract Name is Base1, Base2" before cursor.
-    let base_names = match extract_base_contracts_from_text(before) {
-        Some(names) => names,
-        None => return vec![],
-    };
-    let mut items = Vec::new();
-    let mut seen = FxHashSet::default();
-    for base_name in &base_names {
-        for m in &st.all_members_of(base_name, file) {
-            if seen.insert(m.name.clone()) {
-                items.push(member_to_completion(m));
-            }
-        }
-    }
-    items
 }
 
 /// Find the byte range of the enclosing contract/interface/library body braces
