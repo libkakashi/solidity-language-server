@@ -85,7 +85,8 @@ pub fn semantic_tokens_full(
 
     for (byte_start, byte_end, token_type, modifiers) in &tokens {
         let pos = line_index.byte_offset_to_lsp_position(source, *byte_start);
-        let length = *byte_end - *byte_start;
+        // Compute length in the negotiated encoding (UTF-16 or UTF-8).
+        let length = compute_token_length(source, *byte_start, *byte_end);
         if length == 0 {
             continue;
         }
@@ -113,6 +114,17 @@ pub fn semantic_tokens_full(
         result_id: None,
         data: result,
     }))
+}
+
+/// Compute the length of a token in the negotiated encoding (UTF-16 or UTF-8).
+fn compute_token_length(source: &str, byte_start: usize, byte_end: usize) -> u32 {
+    match crate::utils::encoding() {
+        crate::utils::PositionEncoding::Utf8 => (byte_end - byte_start) as u32,
+        crate::utils::PositionEncoding::Utf16 => {
+            let segment = &source[byte_start..byte_end];
+            segment.chars().map(|c| c.len_utf16() as u32).sum()
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

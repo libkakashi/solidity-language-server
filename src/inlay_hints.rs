@@ -57,8 +57,14 @@ fn collect_hints(
         return;
     }
 
-    if node.kind() == "call_expression" {
-        collect_call_hints(node, st, file, source, line_index, hints);
+    match node.kind() {
+        "call_expression" => {
+            collect_call_hints(node, st, file, source, line_index, hints);
+        }
+        "emit_statement" | "revert_statement" | "modifier_invocation" => {
+            collect_emit_revert_hints(node, st, file, source, line_index, hints);
+        }
+        _ => {}
     }
 
     // Recurse into children.
@@ -107,14 +113,8 @@ fn collect_call_hints(
         return;
     }
 
-    // Find the arguments node — walk children to find the call_argument list.
-    let args_node = match find_arguments_node(&call_node) {
-        Some(n) => n,
-        None => return,
-    };
-
-    // Collect argument expression nodes (skip commas, parens).
-    let arg_nodes = collect_argument_nodes(&args_node);
+    // Collect argument expression nodes from call_argument children.
+    let arg_nodes = collect_call_arguments(&call_node);
 
     // Generate a hint for each argument that has a corresponding named parameter.
     for (i, arg_node) in arg_nodes.iter().enumerate() {
@@ -160,6 +160,156 @@ fn collect_call_hints(
     }
 }
 
+/// Collect parameter name hints for an emit or revert statement.
+///
+/// `emit Transfer(a, b, c)` is parsed as:
+///   emit_statement → emit, expression[identifier], (, call_argument, …, )
+///
+/// `revert Err(a, b)` is parsed as:
+///   revert_statement → revert, expression[identifier], revert_arguments(…)
+fn collect_emit_revert_hints(
+    node: Node,
+    st: &SymbolTable,
+    file: &Path,
+    source: &str,
+    line_index: &LineIndex,
+    hints: &mut Vec<InlayHint>,
+) {
+    // Find the callee name — the first named child that is an expression or
+    // identifier (skip the keyword).
+    let callee_node = {
+        let mut found = None;
+        let mut cursor = node.walk();
+        if cursor.goto_first_child() {
+            loop {
+                let child = cursor.node();
+                match child.kind() {
+                    "expression" | "identifier" | "member_expression" => {
+                        found = Some(child);
+                        break;
+                    }
+                    _ => {}
+                }
+                if !cursor.goto_next_sibling() {
+                    break;
+                }
+            }
+        }
+        match found {
+            Some(n) => n,
+            None => return,
+        }
+    };
+
+    let decl = match resolve_callee_node(st, file, source, &callee_node) {
+        Some(d) => d,
+        None => return,
+    };
+
+    let params = decl.parameters();
+    if params.is_empty() {
+        return;
+    }
+
+    // Collect call_argument children — they may be direct children of the
+    // statement node (emit) or inside a revert_arguments wrapper (revert).
+    let arg_nodes = collect_call_arguments_from_descendants(&node);
+
+    for (i, arg_node) in arg_nodes.iter().enumerate() {
+        if i >= params.len() {
+            break;
+        }
+
+        let param_name = &params[i].1;
+        if param_name.is_empty() {
+            continue;
+        }
+
+        if arg_node.kind() == "call_struct_argument" {
+            continue;
+        }
+
+        let arg_text = node_text(arg_node, source);
+        if arg_text == param_name {
+            continue;
+        }
+
+        if is_trivially_obvious(arg_text, param_name) {
+            continue;
+        }
+
+        let (line, character) = line_index.byte_offset_to_position(source, arg_node.start_byte());
+        let position = Position { line, character };
+        hints.push(InlayHint {
+            position,
+            label: InlayHintLabel::String(format!("{param_name}:")),
+            kind: Some(InlayHintKind::PARAMETER),
+            text_edits: None,
+            tooltip: None,
+            padding_left: None,
+            padding_right: Some(true),
+            data: None,
+        });
+    }
+}
+
+/// Collect call_argument expression nodes from anywhere within a node's direct
+/// children or one level of nesting (for revert_arguments wrappers).
+fn collect_call_arguments_from_descendants<'a>(node: &Node<'a>) -> Vec<Node<'a>> {
+    let mut args = Vec::new();
+    let mut cursor = node.walk();
+    if cursor.goto_first_child() {
+        loop {
+            let child = cursor.node();
+            if child.kind() == "call_argument" {
+                // Unwrap the inner expression.
+                if let Some(inner) = first_named_child(&child) {
+                    args.push(inner);
+                }
+            } else if child.kind() == "revert_arguments" {
+                // Recurse one level into revert_arguments.
+                let mut inner_cursor = child.walk();
+                if inner_cursor.goto_first_child() {
+                    loop {
+                        let ic = inner_cursor.node();
+                        if ic.kind() == "call_argument" {
+                            if let Some(expr) = first_named_child(&ic) {
+                                args.push(expr);
+                            }
+                        }
+                        if !inner_cursor.goto_next_sibling() {
+                            break;
+                        }
+                    }
+                }
+            }
+            if !cursor.goto_next_sibling() {
+                break;
+            }
+        }
+    }
+    args
+}
+
+fn first_named_child<'a>(node: &Node<'a>) -> Option<Node<'a>> {
+    let mut cursor = node.walk();
+    if cursor.goto_first_child() {
+        loop {
+            let child = cursor.node();
+            if child.kind() == "call_struct_argument" {
+                return Some(child);
+            }
+            if child.is_named() {
+                return Some(child);
+            }
+            if !cursor.goto_next_sibling() {
+                break;
+            }
+        }
+    }
+    None
+}
+
 /// Check if the argument name trivially implies the parameter name,
 /// making a hint redundant. For example:
 /// - `_to` → `to` (underscore prefix)
@@ -175,36 +325,38 @@ fn is_trivially_obvious(arg_text: &str, param_name: &str) -> bool {
     stripped.eq_ignore_ascii_case(param_name)
 }
 
-/// Find the arguments list node inside a call_expression.
-fn find_arguments_node<'a>(call_node: &Node<'a>) -> Option<Node<'a>> {
+/// Collect argument nodes from all `call_argument` children of a call_expression.
+///
+/// In tree-sitter-solidity >=1.2, each argument is wrapped in its own
+/// `call_argument` node (rather than a single argument-list node).  Each
+/// `call_argument` contains either a single named `expression` child, or a
+/// `call_struct_argument` for named-argument syntax.
+fn collect_call_arguments<'a>(call_node: &Node<'a>) -> Vec<Node<'a>> {
+    let mut args = Vec::new();
     let mut cursor = call_node.walk();
     if cursor.goto_first_child() {
         loop {
             let child = cursor.node();
             if child.kind() == "call_argument" {
-                return Some(child);
-            }
-            if !cursor.goto_next_sibling() {
-                break;
-            }
-        }
-    }
-    None
-}
-
-/// Collect the actual argument expression nodes from a call_argument node,
-/// skipping punctuation (parens, commas).
-fn collect_argument_nodes<'a>(args_node: &Node<'a>) -> Vec<Node<'a>> {
-    let mut args = Vec::new();
-    let mut cursor = args_node.walk();
-    if cursor.goto_first_child() {
-        loop {
-            let child = cursor.node();
-            if child.is_named() && child.kind() != "call_struct_argument" {
-                args.push(child);
-            } else if child.kind() == "call_struct_argument" {
-                // Named argument — push it so we can skip it in the caller.
-                args.push(child);
+                // Look inside the call_argument for the actual expression or
+                // a call_struct_argument.
+                let mut inner = child.walk();
+                if inner.goto_first_child() {
+                    loop {
+                        let ic = inner.node();
+                        if ic.kind() == "call_struct_argument" {
+                            args.push(ic);
+                            break;
+                        }
+                        if ic.is_named() {
+                            args.push(ic);
+                            break;
+                        }
+                        if !inner.goto_next_sibling() {
+                            break;
+                        }
+                    }
+                }
             }
             if !cursor.goto_next_sibling() {
                 break;
@@ -215,16 +367,100 @@ fn collect_argument_nodes<'a>(args_node: &Node<'a>) -> Vec<Node<'a>> {
 }
 
 /// Resolve a callee CST node to a Declaration.
+///
+/// The callee may be wrapped in an `expression` node (tree-sitter-solidity
+/// >=1.2).  We unwrap transparently before matching on concrete kinds.
 fn resolve_callee_node<'a>(
     st: &'a SymbolTable,
     file: &Path,
     source: &str,
     callee_node: &Node,
 ) -> Option<&'a crate::symbol_table::Declaration> {
+    // Unwrap `expression` wrapper nodes.
+    if callee_node.kind() == "expression" {
+        if let Some(inner) = callee_node.named_child(0) {
+            return resolve_callee_node(st, file, source, &inner);
+        }
+        return None;
+    }
+
     match callee_node.kind() {
         "identifier" => {
             let name = node_text(callee_node, source);
             resolve_name(st, file, name)
+        }
+        "new_expression" => {
+            // `new Token(...)` — resolve the type name to find its constructor.
+            // The constructor is stored as a declaration named "constructor"
+            // whose scope places it inside the contract.  We find the contract
+            // declaration first, then scan for a constructor that immediately
+            // follows it in byte order.
+            if let Some(type_name) = callee_node.child_by_field_name("name") {
+                let name = node_text(&type_name, source);
+                let file_id = st.lookup_file_id(file)?;
+                let fi = st.files.get(&file_id)?;
+                // Find the contract's byte offset so we can locate its constructor.
+                let mut contract_offset = None;
+                for decl in fi.declarations.values() {
+                    if decl.name == name
+                        && matches!(
+                            decl.kind(),
+                            DeclKind::Contract | DeclKind::Interface | DeclKind::Library
+                        )
+                    {
+                        contract_offset = Some(decl.name_range.0);
+                        break;
+                    }
+                }
+                // Find a constructor declaration in this file.
+                for decl in fi.declarations.values() {
+                    if decl.kind() == DeclKind::Constructor {
+                        // If we know the contract offset, verify the constructor
+                        // belongs to it (its offset is after the contract start).
+                        if let Some(co) = contract_offset {
+                            if decl.name_range.0 > co {
+                                return Some(decl);
+                            }
+                        } else {
+                            return Some(decl);
+                        }
+                    }
+                }
+                // Also check imported files.
+                for imp in &fi.imports {
+                    if let Some(ref resolved) = imp.resolved_path {
+                        if let Some(target_fid) = st.lookup_file_id(resolved) {
+                            if let Some(target_fi) = st.files.get(&target_fid) {
+                                let mut co = None;
+                                for decl in target_fi.declarations.values() {
+                                    if decl.name == name
+                                        && matches!(
+                                            decl.kind(),
+                                            DeclKind::Contract
+                                                | DeclKind::Interface
+                                                | DeclKind::Library
+                                        )
+                                    {
+                                        co = Some(decl.name_range.0);
+                                        break;
+                                    }
+                                }
+                                for decl in target_fi.declarations.values() {
+                                    if decl.kind() == DeclKind::Constructor {
+                                        if let Some(offset) = co {
+                                            if decl.name_range.0 > offset {
+                                                return Some(decl);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                return None;
+            }
+            None
         }
         "member_expression" => {
             // e.g., `token.transfer(...)` — resolve the property part.
@@ -358,9 +594,10 @@ mod tests {
     }
 
     #[test]
-    fn test_collect_argument_nodes_empty() {
-        // Verify the function handles being called — we can't easily construct
-        // tree-sitter nodes in isolation, but we test the helper logic.
+    fn test_collect_call_arguments_requires_tree() {
+        // We can't easily construct tree-sitter nodes in isolation, but we
+        // verify the helper compiles and handles the empty-children case
+        // indirectly through integration tests.
         let args: Vec<Node> = Vec::new();
         assert!(args.is_empty());
     }

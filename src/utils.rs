@@ -75,6 +75,16 @@ impl LineIndex {
         Self { line_starts }
     }
 
+    /// Return the byte offset of the start of the given line.
+    pub fn line_start(&self, line: u32) -> usize {
+        let idx = line as usize;
+        if idx < self.line_starts.len() {
+            self.line_starts[idx]
+        } else {
+            *self.line_starts.last().unwrap_or(&0)
+        }
+    }
+
     /// Convert a byte offset to (line, column). O(log n) via binary search.
     pub fn byte_offset_to_position(&self, source: &str, byte_offset: usize) -> (u32, u32) {
         let byte_offset = byte_offset.min(source.len());

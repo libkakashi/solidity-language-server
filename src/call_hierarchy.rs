@@ -51,7 +51,7 @@ pub fn incoming_calls(
     // Group references by their enclosing function.
     let mut callers: Vec<(DeclId, Vec<Range>)> = Vec::new();
 
-    for (ref_path, start, _end) in &refs {
+    for (ref_path, start, end) in &refs {
         let ref_file_id = match st.lookup_file_id(ref_path) {
             Some(id) => id,
             None => continue,
@@ -64,7 +64,7 @@ pub fn incoming_calls(
                 Some(v) => v,
                 None => continue,
             };
-            let range = ref_li.byte_range_to_lsp_range(&ref_source, *start, *start + 1);
+            let range = ref_li.byte_range_to_lsp_range(&ref_source, *start, *end);
 
             if let Some(entry) = callers.iter_mut().find(|(id, _)| *id == enclosing_id) {
                 entry.1.push(range);

@@ -524,8 +524,15 @@ fn to_mixed_case(name: &str) -> String {
 }
 
 fn to_screaming_snake_case(name: &str) -> String {
+    // Preserve leading underscores.
+    let leading = name.len() - name.trim_start_matches('_').len();
+    let prefix = &name[..leading];
+    let rest = &name[leading..];
+
+    let trimmed = rest.trim_end_matches('_');
+
     let mut result = String::with_capacity(name.len() + 4);
-    let trimmed = name.trim_matches('_');
+    result.push_str(prefix);
     let mut prev_lower = false;
     for ch in trimmed.chars() {
         if ch.is_ascii_uppercase() && prev_lower {

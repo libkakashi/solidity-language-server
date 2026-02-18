@@ -119,14 +119,15 @@ fn span_to_range(source_map: &SourceMap, span: Span) -> Range {
             (lo.data.col.0 as u32, hi.data.col.0 as u32)
         }
         utils::PositionEncoding::Utf16 => {
-            // Use the source already loaded by solar (avoids redundant disk read).
+            // Solar's col.0 is a byte offset within the line.  Convert to
+            // an absolute byte offset and then to UTF-16 columns via the
+            // line index.
             let source = &*lo.file.src;
             let line_index = utils::LineIndex::new(source);
-            // Compute byte offset of lo position, then convert.
-            let lo_byte = line_index.position_to_byte_offset(source, lo_line, lo.data.col.0 as u32);
-            let hi_byte = line_index.position_to_byte_offset(source, hi_line, hi.data.col.0 as u32);
-            let (_, lo_col) = line_index.byte_offset_to_position(source, lo_byte);
-            let (_, hi_col) = line_index.byte_offset_to_position(source, hi_byte);
+            let lo_abs = line_index.line_start(lo_line) + lo.data.col.0;
+            let hi_abs = line_index.line_start(hi_line) + hi.data.col.0;
+            let (_, lo_col) = line_index.byte_offset_to_position(source, lo_abs);
+            let (_, hi_col) = line_index.byte_offset_to_position(source, hi_abs);
             (lo_col, hi_col)
         }
     };

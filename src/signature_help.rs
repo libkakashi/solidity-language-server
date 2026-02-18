@@ -41,9 +41,15 @@ pub fn signature_help(
 
     let parameters: Vec<ParameterInformation> = param_labels
         .into_iter()
-        .map(|(start, end)| ParameterInformation {
-            label: ParameterLabel::LabelOffsets([start as u32, end as u32]),
-            documentation: None,
+        .map(|(start, end)| {
+            // Convert byte offsets into the label string to the negotiated
+            // position encoding (UTF-16 or UTF-8) for LabelOffsets.
+            let enc_start = encoding_offset(&label, start);
+            let enc_end = encoding_offset(&label, end);
+            ParameterInformation {
+                label: ParameterLabel::LabelOffsets([enc_start, enc_end]),
+                documentation: None,
+            }
         })
         .collect();
 
@@ -145,6 +151,23 @@ fn find_call_site<'a>(root: Node<'a>, byte_offset: usize) -> Option<CallSite<'a>
 /// Check if the byte_offset is inside the parenthesized argument list
 /// (i.e., after the `(` and before the `)`).
 fn is_inside_arg_list(node: Node, byte_offset: usize) -> bool {
+    // First try direct children (works for call_expression and emit_statement).
+    if is_inside_arg_list_direct(node, byte_offset) {
+        return true;
+    }
+    // For revert_statement, parentheses are inside a `revert_arguments` child.
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == "revert_arguments" {
+            if is_inside_arg_list_direct(child, byte_offset) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn is_inside_arg_list_direct(node: Node, byte_offset: usize) -> bool {
     let mut cursor = node.walk();
     let mut found_open_paren = false;
     for child in node.children(&mut cursor) {
@@ -169,6 +192,12 @@ fn find_emit_callee(node: Node) -> Option<Node> {
         if child.is_named() {
             match child.kind() {
                 "identifier" | "member_expression" => return Some(child),
+                // tree-sitter-solidity >=1.2 wraps the callee in an `expression` node.
+                "expression" => {
+                    if let Some(inner) = child.named_child(0) {
+                        return Some(inner);
+                    }
+                }
                 // In some grammars, emit uses a call_expression child.
                 "call_expression" => {
                     return child.child_by_field_name("function");
@@ -187,6 +216,12 @@ fn find_revert_callee(node: Node) -> Option<Node> {
         if child.is_named() {
             match child.kind() {
                 "identifier" | "member_expression" => return Some(child),
+                // tree-sitter-solidity >=1.2 wraps the callee in an `expression` node.
+                "expression" => {
+                    if let Some(inner) = child.named_child(0) {
+                        return Some(inner);
+                    }
+                }
                 "call_expression" => {
                     return child.child_by_field_name("function");
                 }
@@ -203,12 +238,33 @@ fn find_revert_callee(node: Node) -> Option<Node> {
 
 /// Count the number of top-level commas before the cursor in the argument list.
 fn count_active_parameter(site: &CallSite, byte_offset: usize, _source: &str) -> u32 {
+    // For revert_statement, the commas and parens are inside `revert_arguments`.
+    // Find the right node to iterate.
+    let arg_node = find_arg_container(site.call_node);
+    count_commas_in_node(arg_node, byte_offset)
+}
+
+/// Find the node whose direct children contain the `(`, `,`, `)` tokens.
+///
+/// For `call_expression` and `emit_statement`, the tokens are direct children.
+/// For `revert_statement`, they are inside a `revert_arguments` child.
+fn find_arg_container(node: Node) -> Node {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == "revert_arguments" {
+            return child;
+        }
+    }
+    node
+}
+
+fn count_commas_in_node(node: Node, byte_offset: usize) -> u32 {
     let mut count: u32 = 0;
     let mut depth: i32 = 0;
     let mut past_open_paren = false;
-    let mut cursor = site.call_node.walk();
+    let mut cursor = node.walk();
 
-    for child in site.call_node.children(&mut cursor) {
+    for child in node.children(&mut cursor) {
         if child.start_byte() >= byte_offset {
             break;
         }
@@ -229,13 +285,7 @@ fn count_active_parameter(site: &CallSite, byte_offset: usize, _source: &str) ->
                 _ => {}
             }
         }
-        // Named children like `call_argument` may also contain nested `(`, `)`
-        // but since we only count unnamed `,` at depth == 1, that's fine.
     }
-
-    // Also count commas inside call_argument children (in tree-sitter-solidity
-    // the commas are children of call_expression, not of call_argument).
-    // The above loop already handles this since we iterate all children.
 
     count
 }
@@ -346,6 +396,17 @@ fn build_label(decl: &Declaration) -> (String, Vec<(usize, usize)>) {
     }
 
     (label, param_labels)
+}
+
+/// Convert a byte offset within a label string to the negotiated encoding offset.
+fn encoding_offset(label: &str, byte_offset: usize) -> u32 {
+    match crate::utils::encoding() {
+        crate::utils::PositionEncoding::Utf8 => byte_offset as u32,
+        crate::utils::PositionEncoding::Utf16 => {
+            let segment = &label[..byte_offset];
+            segment.chars().map(|c| c.len_utf16() as u32).sum()
+        }
+    }
 }
 
 /// Attach NatSpec @param documentation to each parameter.
