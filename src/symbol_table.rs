@@ -360,6 +360,8 @@ pub struct FileIndex {
     decl_name_ranges: Vec<(usize, usize, DeclId)>,
     /// Indices into `references`, sorted by range.0 for binary search.
     ref_range_index: Vec<u32>,
+    /// Indices into `scopes`, sorted by range.0 for binary search in find_scope_at.
+    scope_range_index: Vec<u32>,
 }
 
 impl FileIndex {
@@ -378,6 +380,11 @@ impl FileIndex {
         let mut indices: Vec<u32> = (0..self.references.len() as u32).collect();
         indices.sort_unstable_by_key(|&i| self.references[i as usize].range.0);
         self.ref_range_index = indices;
+
+        // Build sorted scope range index.
+        let mut scope_indices: Vec<u32> = (0..self.scopes.len() as u32).collect();
+        scope_indices.sort_unstable_by_key(|&i| self.scopes[i as usize].range.0);
+        self.scope_range_index = scope_indices;
     }
 }
 
@@ -921,6 +928,7 @@ fn build_file_index(
         using_directives: Vec::new(),
         decl_name_ranges: Vec::new(),
         ref_range_index: Vec::new(),
+        scope_range_index: Vec::new(),
     };
 
     // Create file-level scope.
@@ -2612,18 +2620,23 @@ fn extract_natspec(node: &Node, source: &str) -> Option<String> {
 }
 
 /// Find the innermost scope containing byte_offset. (Fix #5)
-/// Uses the fact that scopes are created in tree order, so we can scan
-/// and pick the smallest range containing the offset.
+/// Uses a sorted scope index and binary search to narrow candidates.
 fn find_scope_at(fi: &FileIndex, byte_offset: usize) -> Option<ScopeId> {
+    let idx = &fi.scope_range_index;
+    // Find the partition point: all scopes at indices < p have start <= byte_offset.
+    let p = idx.partition_point(|&i| fi.scopes[i as usize].range.0 <= byte_offset);
     let mut best: Option<ScopeId> = None;
     let mut best_size = usize::MAX;
-    for scope in &fi.scopes {
-        if scope.range.0 <= byte_offset && byte_offset < scope.range.1 {
-            let size = scope.range.1 - scope.range.0;
-            if size < best_size {
-                best_size = size;
-                best = Some(scope.id);
-            }
+    // Only scopes with start <= byte_offset can contain it; iterate backwards.
+    for &i in idx[..p].iter().rev() {
+        let scope = &fi.scopes[i as usize];
+        let size = scope.range.1 - scope.range.0;
+        // Scopes are sorted by start; once we see one too large to improve, we can't
+        // do better by going further back (starts get smaller, ranges get larger).
+        // But nested scopes can have same start with smaller size, so we can't break early.
+        if byte_offset < scope.range.1 && size < best_size {
+            best_size = size;
+            best = Some(scope.id);
         }
     }
     best
