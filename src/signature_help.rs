@@ -80,7 +80,7 @@ struct CallSite<'a> {
     /// The node representing the callee (function name, member expression, etc.).
     callee: Node<'a>,
     /// The kind of call site (determines how to interpret the callee).
-    kind: CallSiteKind,
+    _kind: CallSiteKind,
     /// The full call node (call_expression, emit_statement, etc.) for param counting.
     call_node: Node<'a>,
 }
@@ -108,7 +108,7 @@ fn find_call_site<'a>(root: Node<'a>, byte_offset: usize) -> Option<CallSite<'a>
                     if let Some(callee) = node.child_by_field_name("function") {
                         return Some(CallSite {
                             callee,
-                            kind: CallSiteKind::FunctionCall,
+                            _kind: CallSiteKind::FunctionCall,
                             call_node: node,
                         });
                     }
@@ -119,7 +119,7 @@ fn find_call_site<'a>(root: Node<'a>, byte_offset: usize) -> Option<CallSite<'a>
                     if let Some(callee) = find_emit_callee(node) {
                         return Some(CallSite {
                             callee,
-                            kind: CallSiteKind::Emit,
+                            _kind: CallSiteKind::Emit,
                             call_node: node,
                         });
                     }
@@ -130,7 +130,7 @@ fn find_call_site<'a>(root: Node<'a>, byte_offset: usize) -> Option<CallSite<'a>
                     if let Some(callee) = find_revert_callee(node) {
                         return Some(CallSite {
                             callee,
-                            kind: CallSiteKind::Revert,
+                            _kind: CallSiteKind::Revert,
                             call_node: node,
                         });
                     }

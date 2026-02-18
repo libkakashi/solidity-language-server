@@ -12,7 +12,7 @@
 | Text Document Sync | **Y** (Full) | **Y** (Incremental) | - |
 | Completion | **Y** | **Y** | - |
 | Completion Resolve | **N** | **N** | Low |
-| Signature Help | **N** | **Y** | **High** |
+| Signature Help | **Y** | **Y** | ~~High~~ Done |
 | Hover | **Y** | **Y** | - |
 | Go to Definition | **Y** | **Y** | - |
 | Go to Declaration | **Y** | **N** | - |
@@ -40,7 +40,7 @@
 ## Implementation Plan (ordered by priority)
 
 - [x] 1. Code Actions / Quick Fixes — 7 lint-driven auto-fixes
-- [ ] 2. Signature Help — parameter tracking on `(` and `,`
+- [x] 2. Signature Help — parameter tracking on `(` and `,`
 - [ ] 3. Semantic Tokens — syntax-aware highlighting
 - [ ] 4. Go to Type Definition — variable → type navigation
 - [ ] 5. Go to Implementation — interface → concrete impl

@@ -10,6 +10,7 @@ use crate::lint::LintEngine;
 use crate::parser::{self, TsParser};
 use crate::references;
 use crate::rename;
+use crate::semantic_tokens;
 use crate::signature_help;
 use crate::solar_checker;
 use crate::symbol_table::SymbolTable;
@@ -316,6 +317,18 @@ impl LanguageServer for SolLsp {
                     },
                 }),
                 code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
+                semantic_tokens_provider: Some(
+                    SemanticTokensServerCapabilities::SemanticTokensOptions(
+                        SemanticTokensOptions {
+                            legend: semantic_tokens::legend(),
+                            full: Some(SemanticTokensFullOptions::Bool(true)),
+                            range: None,
+                            work_done_progress_options: WorkDoneProgressOptions {
+                                work_done_progress: Some(false),
+                            },
+                        },
+                    ),
+                ),
                 document_formatting_provider: Some(OneOf::Left(true)),
                 text_document_sync: Some(TextDocumentSyncCapability::Options(
                     TextDocumentSyncOptions {
@@ -634,6 +647,29 @@ impl LanguageServer for SolLsp {
             &file_path,
             &source,
             position,
+            &line_index,
+            cached_tree.as_ref(),
+        ))
+    }
+
+    async fn semantic_tokens_full(
+        &self,
+        params: SemanticTokensParams,
+    ) -> tower_lsp::jsonrpc::Result<Option<SemanticTokensResult>> {
+        let uri = &params.text_document.uri;
+
+        let (file_path, source, line_index) = match self.get_source_and_path(uri).await {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+
+        let cached_tree = self.tree_cache.read().await.get(uri).cloned();
+
+        let st = self.symbol_table.read().await;
+        Ok(semantic_tokens::semantic_tokens_full(
+            &st,
+            &file_path,
+            &source,
             &line_index,
             cached_tree.as_ref(),
         ))
