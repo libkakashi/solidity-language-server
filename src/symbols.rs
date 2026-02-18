@@ -1,5 +1,3 @@
-#![allow(deprecated)]
-
 use std::path::Path;
 
 use tower_lsp::lsp_types::{DocumentSymbol, Location, SymbolInformation, SymbolKind, Url};
@@ -47,6 +45,7 @@ pub fn document_symbols(
 
 /// Extract workspace symbols (flat list across all files).
 /// Uses cached source from symbol table when available. (Fix #8)
+#[allow(deprecated)] // SymbolInformation.deprecated field — LSP spec compat
 pub fn workspace_symbols(st: &SymbolTable, query: &str) -> Vec<SymbolInformation> {
     let query_lower = query.to_lowercase();
     let mut results = Vec::new();
@@ -108,6 +107,7 @@ pub fn workspace_symbols(st: &SymbolTable, query: &str) -> Vec<SymbolInformation
     results
 }
 
+#[allow(deprecated)] // DocumentSymbol.deprecated field — LSP spec compat
 fn collect_children(
     fi: &FileIndex,
     source: &str,
@@ -173,6 +173,7 @@ fn collect_children(
     children
 }
 
+#[allow(deprecated)] // DocumentSymbol.deprecated field — LSP spec compat
 fn make_document_symbol(
     decl: &Declaration,
     source: &str,
