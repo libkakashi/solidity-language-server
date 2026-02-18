@@ -1669,7 +1669,6 @@ contract Pool {
 // 1. Using-for directives (UNIMPLEMENTED)
 // ---------------------------------------------------------------------------
 #[test]
-#[ignore]
 fn test_edge_using_for_directive() {
     let source = r#"
 library SafeMath {
@@ -1701,7 +1700,6 @@ contract Foo {
 // 2. Try/catch blocks (UNIMPLEMENTED — catch variable scoping not handled)
 // ---------------------------------------------------------------------------
 #[test]
-#[ignore]
 fn test_edge_try_catch_variable_scoping() {
     let source = r#"
 interface IExternal {
@@ -1824,7 +1822,6 @@ contract Foo {
 //    Only direct bases are searched, so transitive resolution is UNIMPLEMENTED.
 // ---------------------------------------------------------------------------
 #[test]
-#[ignore]
 fn test_edge_multi_level_inheritance() {
     let source = r#"
 contract GrandParent {
@@ -1858,7 +1855,6 @@ contract Child is Parent {
 // 6. Function overloading — same name different params (UNIMPLEMENTED)
 // ---------------------------------------------------------------------------
 #[test]
-#[ignore]
 fn test_edge_function_overloading() {
     let source = r#"
 contract Foo {
@@ -2897,7 +2893,6 @@ contract Main {
 // 30. Re-export chains (UNIMPLEMENTED)
 // ---------------------------------------------------------------------------
 #[test]
-#[ignore]
 fn test_edge_reexport_chain() {
     let tmp = tempfile::tempdir().unwrap();
     let a_path = tmp.path().join("A.sol");

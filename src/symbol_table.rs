@@ -798,8 +798,40 @@ fn walk_node(node: &Node, scope_id: ScopeId, file_id: FileId, source: &str, fi: 
             let new_scope = create_scope(fi, Some(scope_id), ScopeKind::Block, node);
             walk_children(node, new_scope, file_id, source, fi);
         }
-        "if_statement" | "try_statement" => {
+        "if_statement" => {
             walk_children(node, scope_id, file_id, source, fi);
+        }
+        "try_statement" => {
+            // Walk the attempt expression in current scope.
+            if let Some(attempt) = node.child_by_field_name("attempt") {
+                walk_node(&attempt, scope_id, file_id, source, fi);
+            }
+            // Create scope for try returns params + body.
+            let try_scope = create_scope(fi, Some(scope_id), ScopeKind::Block, node);
+            // Declare return parameters as local variables.
+            declare_parameters_as_locals(node, try_scope, file_id, source, fi);
+            // Walk the try body.
+            if let Some(body) = node.child_by_field_name("body") {
+                walk_node(&body, try_scope, file_id, source, fi);
+            }
+            // Handle catch clauses.
+            let mut cursor = node.walk();
+            if cursor.goto_first_child() {
+                loop {
+                    if cursor.node().kind() == "catch_clause" {
+                        let catch_node = cursor.node();
+                        let catch_scope =
+                            create_scope(fi, Some(scope_id), ScopeKind::Block, &catch_node);
+                        declare_parameters_as_locals(&catch_node, catch_scope, file_id, source, fi);
+                        if let Some(body) = catch_node.child_by_field_name("body") {
+                            walk_node(&body, catch_scope, file_id, source, fi);
+                        }
+                    }
+                    if !cursor.goto_next_sibling() {
+                        break;
+                    }
+                }
+            }
         }
         "identifier" => {
             if !is_declaration_name(node) {
@@ -1981,6 +2013,51 @@ fn extract_parameters(
     params
 }
 
+/// Declare `parameter` children of a node as LocalVariable declarations in the
+/// given scope.  Used for try-statement return params and catch-clause params.
+fn declare_parameters_as_locals(
+    node: &Node,
+    scope_id: ScopeId,
+    file_id: FileId,
+    source: &str,
+    fi: &mut FileIndex,
+) {
+    let mut cursor = node.walk();
+    if cursor.goto_first_child() {
+        loop {
+            let child = cursor.node();
+            if child.kind() == "parameter" {
+                if let Some(name_node) = child.child_by_field_name("name") {
+                    let type_text = child
+                        .child_by_field_name("type")
+                        .map(|t| node_text(&t, source).to_string());
+
+                    let (decl_id, mut decl) = make_decl(
+                        file_id,
+                        &name_node,
+                        &child,
+                        source,
+                        DeclKind::LocalVariable,
+                        scope_id,
+                    );
+                    decl.type_text = type_text;
+
+                    let name = decl.name.clone();
+                    fi.declarations.insert(decl_id, decl);
+                    register_in_scope(fi, scope_id, &name, &decl_id);
+
+                    if let Some(type_node) = child.child_by_field_name("type") {
+                        walk_node(&type_node, scope_id, file_id, source, fi);
+                    }
+                }
+            }
+            if !cursor.goto_next_sibling() {
+                break;
+            }
+        }
+    }
+}
+
 /// Walk the type nodes of `parameter` children so that user-defined types
 /// inside function parameters / return parameters generate references.
 fn walk_parameter_types(
@@ -2484,17 +2561,21 @@ fn resolve_member(
         | DeclKind::Constant => {
             let type_text = st.get_declaration(&container_decl_id)?.type_text.clone()?;
             let base_type = strip_type_modifiers(&type_text);
-            let type_decl_id = find_type_declaration(st, container_file, base_type)?;
-            let type_decl = st.get_declaration(&type_decl_id)?;
-            match type_decl.kind {
-                DeclKind::Contract | DeclKind::Interface | DeclKind::Library => {
-                    find_member_in_scope(st, &type_decl_id, member_name)
+            // Try regular type-based member lookup first.
+            if let Some(type_decl_id) = find_type_declaration(st, container_file, base_type) {
+                let type_decl = st.get_declaration(&type_decl_id)?;
+                match type_decl.kind {
+                    DeclKind::Contract | DeclKind::Interface | DeclKind::Library => {
+                        return find_member_in_scope(st, &type_decl_id, member_name);
+                    }
+                    DeclKind::Struct | DeclKind::Enum => {
+                        return find_member_by_decl_id(st, &type_decl_id, member_name);
+                    }
+                    _ => {}
                 }
-                DeclKind::Struct | DeclKind::Enum => {
-                    find_member_by_decl_id(st, &type_decl_id, member_name)
-                }
-                _ => None,
             }
+            // Fallback: check using-for directives.
+            resolve_using_for_member(st, file_id, &type_text, member_name)
         }
         // Function kinds: resolve the return type, then search inside it.
         DeclKind::Function | DeclKind::Constructor => {
@@ -2539,7 +2620,45 @@ fn resolve_in_base_contract(
     // Find the base contract declaration.
     let base_decl_id = find_type_declaration(st, file_id, base_name)?;
     // Search its scope for the member.
-    find_member_in_scope(st, &base_decl_id, member_name)
+    if let Some(found) = find_member_in_scope(st, &base_decl_id, member_name) {
+        return Some(found);
+    }
+    // Recurse through grandparent bases.
+    let base_decl = st.get_declaration(&base_decl_id)?;
+    let grandparent_names: Vec<String> = base_decl.base_contracts().to_vec();
+    for gp_name in &grandparent_names {
+        if let Some(found) = resolve_in_base_contract(st, base_decl_id.file, gp_name, member_name)
+        {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// Resolve a member via using-for directives (e.g., `using SafeMath for uint256`).
+fn resolve_using_for_member(
+    st: &SymbolTable,
+    file_id: FileId,
+    type_text: &str,
+    member_name: &str,
+) -> Option<DeclId> {
+    let fi = st.files.get(&file_id)?;
+    let stripped = strip_type_modifiers(type_text);
+    for using in &fi.using_directives {
+        let applies = match &using.target_type {
+            None => true, // `using X for *`
+            Some(target) => strip_type_modifiers(target) == stripped,
+        };
+        if !applies {
+            continue;
+        }
+        if let Some(lib_decl_id) = find_type_declaration(st, file_id, &using.library_name) {
+            if let Some(found) = find_member_in_scope(st, &lib_decl_id, member_name) {
+                return Some(found);
+            }
+        }
+    }
+    None
 }
 
 /// Find a member inside a contract/interface/library by searching its scope.
