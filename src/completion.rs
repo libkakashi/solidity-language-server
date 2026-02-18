@@ -280,12 +280,7 @@ fn this_completions(
 
         // Collect own external/public functions from the contract's scope.
         for s in &fi.scopes {
-            if matches!(
-                s.kind,
-                ScopeKind::Contract | ScopeKind::Interface | ScopeKind::Library
-            ) && s.range.0 >= contract.full_range.0
-                && s.range.1 <= contract.full_range.1
-            {
+            if s.owner == Some(contract.id) {
                 for (name, did) in &s.declarations {
                     if let Some(d) = fi.declarations.get(did) {
                         if is_public_function(d) && seen.insert(name.clone()) {
@@ -408,16 +403,8 @@ fn find_enclosing_contract<'a>(
             scope.kind,
             ScopeKind::Contract | ScopeKind::Interface | ScopeKind::Library
         ) {
-            // Find the contract/interface declaration that owns this scope.
-            for decl in fi.declarations.values() {
-                if matches!(
-                    decl.kind,
-                    DeclKind::Contract | DeclKind::Interface | DeclKind::Library
-                ) && scope.range.0 >= decl.full_range.0
-                    && scope.range.1 <= decl.full_range.1
-                {
-                    return Some(decl);
-                }
+            if let Some(decl) = scope.owner.and_then(|id| fi.declarations.get(&id)) {
+                return Some(decl);
             }
         }
         current = scope.parent;

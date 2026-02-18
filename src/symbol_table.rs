@@ -283,6 +283,8 @@ pub struct Scope {
     pub parent: Option<ScopeId>,
     pub kind: ScopeKind,
     pub range: (usize, usize),
+    /// The contract/interface/library/struct declaration that owns this scope, if any.
+    pub owner: Option<DeclId>,
     /// Declarations in this scope — Vec is faster than HashMap for <~16 entries
     /// due to cache locality. Most Solidity scopes are small.
     pub declarations: Vec<(String, DeclId)>,
@@ -631,20 +633,14 @@ impl SymbolTable {
         while let Some(sid) = cs {
             if let Some(scope) = fi.scopes.get(sid) {
                 if matches!(scope.kind, ScopeKind::Contract | ScopeKind::Interface) {
-                    for decl in fi.declarations.values() {
-                        if matches!(decl.kind, DeclKind::Contract | DeclKind::Interface)
-                            && scope.range.0 >= decl.full_range.0
-                            && scope.range.1 <= decl.full_range.1
-                        {
-                            for base_name in decl.base_contracts() {
-                                self.collect_base_declarations(
-                                    file_id,
-                                    base_name,
-                                    &mut result,
-                                    &mut seen,
-                                );
-                            }
-                            break;
+                    if let Some(decl) = scope.owner.and_then(|id| fi.declarations.get(&id)) {
+                        for base_name in decl.base_contracts() {
+                            self.collect_base_declarations(
+                                file_id,
+                                base_name,
+                                &mut result,
+                                &mut seen,
+                            );
                         }
                     }
                     break;
@@ -864,13 +860,7 @@ impl SymbolTable {
 
         // Find the scope of the base contract and add its declarations.
         for scope in &base_fi.scopes {
-            let in_range =
-                scope.range.0 >= base_decl.full_range.0 && scope.range.1 <= base_decl.full_range.1;
-            let is_ns = matches!(
-                scope.kind,
-                ScopeKind::Contract | ScopeKind::Interface | ScopeKind::Library
-            );
-            if in_range && is_ns {
+            if scope.owner == Some(base_decl_id) {
                 for (_, decl_id) in &scope.declarations {
                     if seen.insert(*decl_id) {
                         if let Some(decl) = base_fi.declarations.get(decl_id) {
@@ -881,6 +871,7 @@ impl SymbolTable {
                         }
                     }
                 }
+                break;
             }
         }
 
@@ -968,6 +959,7 @@ fn build_file_index(
         parent: None,
         kind: ScopeKind::File,
         range: (root.start_byte(), root.end_byte()),
+        owner: None,
         declarations: Vec::new(),
     });
 
@@ -1372,6 +1364,9 @@ fn walk_contract(
         extras.members = members;
     }
     decl.natspec = natspec;
+
+    // Link the contract scope back to its owning declaration.
+    fi.scopes[contract_scope].owner = Some(decl_id);
 
     let name = decl.name.clone();
     fi.declarations.insert(decl_id, decl);
@@ -2195,6 +2190,7 @@ fn create_scope(
         parent,
         kind,
         range: (node.start_byte(), node.end_byte()),
+        owner: None,
         declarations: Vec::new(),
     });
     id
@@ -2797,21 +2793,13 @@ fn resolve_single(
         while let Some(sid) = current {
             if let Some(scope) = fi.scopes.get(sid) {
                 if matches!(scope.kind, ScopeKind::Contract | ScopeKind::Interface) {
-                    // Find the contract declaration that owns this scope.
-                    for decl in fi.declarations.values() {
-                        if matches!(decl.kind, DeclKind::Contract | DeclKind::Interface)
-                            && scope.range.0 >= decl.full_range.0
-                            && scope.range.1 <= decl.full_range.1
-                        {
-                            // Search each base contract.
-                            for base_name in decl.base_contracts() {
-                                if let Some(result) =
-                                    resolve_in_base_contract(st, file_id, base_name, name)
-                                {
-                                    return Some(result);
-                                }
+                    if let Some(decl) = scope.owner.and_then(|id| fi.declarations.get(&id)) {
+                        for base_name in decl.base_contracts() {
+                            if let Some(result) =
+                                resolve_in_base_contract(st, file_id, base_name, name)
+                            {
+                                return Some(result);
                             }
-                            break;
                         }
                     }
                     break;
@@ -3056,24 +3044,15 @@ fn resolve_super_member(
             scope.kind,
             ScopeKind::Contract | ScopeKind::Interface | ScopeKind::Library
         ) {
-            // Find the contract declaration that owns this scope.
-            for decl in fi.declarations.values() {
-                if matches!(
-                    decl.kind,
-                    DeclKind::Contract | DeclKind::Interface | DeclKind::Library
-                ) && scope.range.0 >= decl.full_range.0
-                    && scope.range.1 <= decl.full_range.1
-                {
-                    // Search each base contract for the member.
-                    for base_name in decl.base_contracts() {
-                        if let Some(result) =
-                            resolve_in_base_contract(st, file_id, base_name, member_name)
-                        {
-                            return Some(result);
-                        }
+            if let Some(decl) = scope.owner.and_then(|id| fi.declarations.get(&id)) {
+                for base_name in decl.base_contracts() {
+                    if let Some(result) =
+                        resolve_in_base_contract(st, file_id, base_name, member_name)
+                    {
+                        return Some(result);
                     }
-                    return None;
                 }
+                return None;
             }
         }
         current = scope.parent;
@@ -3140,21 +3119,14 @@ fn find_member_in_scope(
     member_name: &str,
 ) -> Option<DeclId> {
     let fi = st.files.get(&container_decl_id.file)?;
-    let container_decl = fi.declarations.get(container_decl_id)?;
 
-    // Find the scope whose range is within the container's full_range
-    // and has a matching ScopeKind.
+    // Find the scope owned by this container declaration.
     for scope in &fi.scopes {
-        let in_range = scope.range.0 >= container_decl.full_range.0
-            && scope.range.1 <= container_decl.full_range.1;
-        let is_ns_scope = matches!(
-            scope.kind,
-            ScopeKind::Contract | ScopeKind::Interface | ScopeKind::Library
-        );
-        if in_range && is_ns_scope {
+        if scope.owner.as_ref() == Some(container_decl_id) {
             if let Some(decl_id) = scope.get_decl(member_name) {
                 return Some(*decl_id);
             }
+            break;
         }
     }
     None
