@@ -195,13 +195,16 @@ impl SolLsp {
         }
     }
 
-    async fn get_source_and_path(&self, uri: &Url) -> Option<(PathBuf, String, LineIndex)> {
+    async fn get_source_and_path(&self, uri: &Url) -> Option<(PathBuf, Arc<str>, LineIndex)> {
         let file_path = uri.to_file_path().ok()?;
-        let text_cache = self.text_cache.read().await;
-        let source = if let Some(cached) = text_cache.get(uri) {
-            cached.to_string()
-        } else {
-            std::fs::read_to_string(&file_path).ok()?
+        let source: Arc<str> = {
+            let text_cache = self.text_cache.read().await;
+            if let Some(cached) = text_cache.get(uri) {
+                Arc::clone(cached)
+            } else {
+                drop(text_cache);
+                std::fs::read_to_string(&file_path).ok()?.into()
+            }
         };
         let line_index = LineIndex::new(&source);
         Some((file_path, source, line_index))
@@ -642,13 +645,13 @@ impl LanguageServer for SolLsp {
     ) -> tower_lsp::jsonrpc::Result<Option<Vec<TextEdit>>> {
         let uri = &params.text_document.uri;
 
-        let source = {
+        let source: Arc<str> = {
             let text_cache = self.text_cache.read().await;
             match text_cache.get(uri) {
-                Some(cached) => cached.to_string(),
+                Some(cached) => Arc::clone(cached),
                 None => match uri.to_file_path() {
                     Ok(path) => match std::fs::read_to_string(&path) {
-                        Ok(c) => c,
+                        Ok(c) => c.into(),
                         Err(_) => return Ok(None),
                     },
                     Err(_) => return Ok(None),
@@ -669,7 +672,7 @@ impl LanguageServer for SolLsp {
             match result {
                 std::borrow::Cow::Borrowed(_) => None, // No changes needed (returned source as-is).
                 std::borrow::Cow::Owned(formatted) => {
-                    if formatted == source {
+                    if formatted == *source {
                         None
                     } else {
                         Some((formatted, source.lines().count()))
