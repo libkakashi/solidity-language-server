@@ -19,6 +19,7 @@ use crate::signature_help;
 use crate::solar_checker;
 use crate::symbol_table::SymbolTable;
 use crate::symbols;
+use crate::type_hierarchy;
 use crate::utils::{self, LineIndex};
 use rustc_hash::FxHashMap;
 use std::path::PathBuf;
@@ -900,6 +901,54 @@ impl LanguageServer for SolLsp {
             Ok(None)
         } else {
             Ok(Some(calls))
+        }
+    }
+
+    async fn prepare_type_hierarchy(
+        &self,
+        params: TypeHierarchyPrepareParams,
+    ) -> tower_lsp::jsonrpc::Result<Option<Vec<TypeHierarchyItem>>> {
+        let uri = &params.text_document_position_params.text_document.uri;
+        let position = params.text_document_position_params.position;
+
+        let (file_path, source, line_index) = match self.get_source_and_path(uri).await {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+
+        let st = self.symbol_table.read().await;
+        Ok(type_hierarchy::prepare(
+            &st,
+            &file_path,
+            &source,
+            position,
+            &line_index,
+        ))
+    }
+
+    async fn supertypes(
+        &self,
+        params: TypeHierarchySupertypesParams,
+    ) -> tower_lsp::jsonrpc::Result<Option<Vec<TypeHierarchyItem>>> {
+        let st = self.symbol_table.read().await;
+        let items = type_hierarchy::supertypes(&st, &params.item);
+        if items.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(items))
+        }
+    }
+
+    async fn subtypes(
+        &self,
+        params: TypeHierarchySubtypesParams,
+    ) -> tower_lsp::jsonrpc::Result<Option<Vec<TypeHierarchyItem>>> {
+        let st = self.symbol_table.read().await;
+        let items = type_hierarchy::subtypes(&st, &params.item);
+        if items.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(items))
         }
     }
 

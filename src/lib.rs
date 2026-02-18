@@ -20,4 +20,5 @@ pub mod signature_help;
 pub mod solar_checker;
 pub mod symbol_table;
 pub mod symbols;
+pub mod type_hierarchy;
 pub mod utils;
