@@ -587,6 +587,11 @@ impl FileIndex {
             }
         }
     }
+
+    /// Get sorted top-level export names.
+    pub fn top_level_names(&self) -> impl Iterator<Item = &String> {
+        self.top_level_names.keys()
+    }
 }
 
 /// Project-wide symbol table.

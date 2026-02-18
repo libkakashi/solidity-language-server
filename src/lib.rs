@@ -1,3 +1,4 @@
+pub mod code_actions;
 pub mod completion;
 pub mod fmt_config;
 pub mod formatter;

@@ -1,3 +1,4 @@
+use crate::code_actions;
 use crate::completion;
 use crate::fmt_config::{self, FmtConfig};
 use crate::formatter;
@@ -306,6 +307,7 @@ impl LanguageServer for SolLsp {
                         work_done_progress: Some(false),
                     },
                 }),
+                code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
                 document_formatting_provider: Some(OneOf::Left(true)),
                 text_document_sync: Some(TextDocumentSyncCapability::Options(
                     TextDocumentSyncOptions {
@@ -654,6 +656,36 @@ impl LanguageServer for SolLsp {
             Ok(None)
         } else {
             Ok(Some(links))
+        }
+    }
+
+    async fn code_action(
+        &self,
+        params: CodeActionParams,
+    ) -> tower_lsp::jsonrpc::Result<Option<CodeActionResponse>> {
+        let uri = &params.text_document.uri;
+        let range = params.range;
+        let diagnostics = &params.context.diagnostics;
+
+        let (file_path, source, line_index) = match self.get_source_and_path(uri).await {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+
+        let st = self.symbol_table.read().await;
+        let actions = code_actions::code_actions(
+            &st,
+            &file_path,
+            &source,
+            range,
+            diagnostics,
+            &line_index,
+            uri,
+        );
+        if actions.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(actions))
         }
     }
 
