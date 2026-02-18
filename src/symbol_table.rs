@@ -246,6 +246,17 @@ impl Reference {
     }
 }
 
+/// A `using Library for Type` directive.
+#[derive(Debug, Clone)]
+pub struct UsingDirective {
+    /// The library/type being attached (e.g., "SafeMath").
+    pub library_name: String,
+    /// The target type (e.g., "uint256"), or None for `using X for *`.
+    pub target_type: Option<String>,
+    /// Scope this using directive is declared in.
+    pub scope: ScopeId,
+}
+
 /// Per-file index.
 #[derive(Debug, Clone)]
 pub struct FileIndex {
@@ -254,6 +265,7 @@ pub struct FileIndex {
     pub declarations: HashMap<DeclId, Declaration>,
     pub references: Vec<Reference>,
     pub imports: Vec<ImportInfo>,
+    pub using_directives: Vec<UsingDirective>,
 }
 
 /// Project-wide symbol table.
@@ -453,6 +465,37 @@ impl SymbolTable {
             }
         }
 
+        // Add inherited declarations from base contracts.
+        let mut cs = Some(scope_id);
+        while let Some(sid) = cs {
+            if let Some(scope) = fi.scopes.get(sid) {
+                if matches!(
+                    scope.kind,
+                    ScopeKind::Contract | ScopeKind::Interface
+                ) {
+                    for decl in fi.declarations.values() {
+                        if matches!(
+                            decl.kind,
+                            DeclKind::Contract | DeclKind::Interface
+                        ) && scope.range.0 >= decl.full_range.0
+                            && scope.range.1 <= decl.full_range.1
+                        {
+                            for base_name in decl.base_contracts() {
+                                self.collect_base_declarations(
+                                    file_id, base_name, &mut result, &mut seen,
+                                );
+                            }
+                            break;
+                        }
+                    }
+                    break;
+                }
+                cs = scope.parent;
+            } else {
+                break;
+            }
+        }
+
         // Also add imported declarations.
         for imp in &fi.imports {
             if let Some(ref resolved_path) = imp.resolved_path {
@@ -556,6 +599,97 @@ impl SymbolTable {
         let file_id = self.interner.lookup(path)?;
         self.files.get(&file_id)
     }
+
+    /// Collect declarations from a base contract (for inherited member completion).
+    /// Recursively collects from grandparent bases too.
+    fn collect_base_declarations<'a>(
+        &'a self,
+        origin_file: FileId,
+        base_name: &str,
+        result: &mut Vec<&'a Declaration>,
+        seen: &mut FxHashSet<DeclId>,
+    ) {
+        let base_decl_id = match find_type_declaration(self, origin_file, base_name) {
+            Some(id) => id,
+            None => return,
+        };
+        let base_fi = match self.files.get(&base_decl_id.file) {
+            Some(fi) => fi,
+            None => return,
+        };
+        let base_decl = match base_fi.declarations.get(&base_decl_id) {
+            Some(d) => d,
+            None => return,
+        };
+
+        // Find the scope of the base contract and add its declarations.
+        for scope in &base_fi.scopes {
+            let in_range = scope.range.0 >= base_decl.full_range.0
+                && scope.range.1 <= base_decl.full_range.1;
+            let is_ns = matches!(
+                scope.kind,
+                ScopeKind::Contract | ScopeKind::Interface | ScopeKind::Library
+            );
+            if in_range && is_ns {
+                for (_, decl_id) in &scope.declarations {
+                    if seen.insert(*decl_id) {
+                        if let Some(decl) = base_fi.declarations.get(decl_id) {
+                            // Skip private members.
+                            if decl.visibility.as_deref() != Some("private") {
+                                result.push(decl);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Recursively add from grandparent bases.
+        let grandparent_names: Vec<String> = base_decl.base_contracts().to_vec();
+        for gp_name in &grandparent_names {
+            self.collect_base_declarations(base_decl_id.file, gp_name, result, seen);
+        }
+    }
+
+    /// Get using-for library methods that apply to a given type in a scope.
+    pub fn using_for_members(
+        &self,
+        type_text: &str,
+        path: &Path,
+        _scope_id: ScopeId,
+    ) -> Vec<MemberInfo> {
+        let file_id = match self.interner.lookup(path) {
+            Some(id) => id,
+            None => return vec![],
+        };
+        let fi = match self.files.get(&file_id) {
+            Some(fi) => fi,
+            None => return vec![],
+        };
+
+        let stripped = strip_type_modifiers(type_text);
+        let mut result = Vec::new();
+
+        for using in &fi.using_directives {
+            let applies = match &using.target_type {
+                None => true, // `using X for *`
+                Some(target) => strip_type_modifiers(target) == stripped,
+            };
+            if !applies {
+                continue;
+            }
+
+            // Get members of the library.
+            let lib_members = self.members_of(&using.library_name, path);
+            for m in lib_members {
+                if m.kind == DeclKind::Function {
+                    result.push(m.clone());
+                }
+            }
+        }
+
+        result
+    }
 }
 
 fn is_member_bearing_kind(kind: DeclKind) -> bool {
@@ -586,6 +720,7 @@ fn build_file_index(
         declarations: Default::default(),
         references: Vec::new(),
         imports: Vec::new(),
+        using_directives: Vec::new(),
     };
 
     // Create file-level scope.
@@ -648,6 +783,9 @@ fn walk_node(node: &Node, scope_id: ScopeId, file_id: FileId, source: &str, fi: 
         }
         "import_directive" => {
             walk_import(node, scope_id, file_id, source, fi);
+        }
+        "using_directive" => {
+            walk_using_directive(node, scope_id, source, fi);
         }
         "variable_declaration_statement" => {
             walk_variable_decl_stmt(node, scope_id, file_id, source, fi);
@@ -1506,6 +1644,63 @@ fn walk_user_defined_type_def(
     let name = decl.name.clone();
     fi.declarations.insert(decl_id, decl);
     register_in_scope(fi, scope_id, &name, &decl_id);
+}
+
+fn walk_using_directive(node: &Node, scope_id: ScopeId, source: &str, fi: &mut FileIndex) {
+    // Grammar: using_directive has child `type_alias` (containing the library identifier)
+    // and field `source` (the target type, or `any_source_type` for `*`).
+    let mut library_name: Option<String> = None;
+    let mut cursor = node.walk();
+    if cursor.goto_first_child() {
+        loop {
+            let child = cursor.node();
+            if child.kind() == "type_alias" {
+                // The type_alias contains identifier children — take the first.
+                let mut inner = child.walk();
+                if inner.goto_first_child() {
+                    loop {
+                        if inner.node().kind() == "identifier" {
+                            library_name = Some(node_text(&inner.node(), source).to_string());
+                            break;
+                        }
+                        if !inner.goto_next_sibling() {
+                            break;
+                        }
+                    }
+                }
+                break;
+            }
+            // Fallback: bare identifier at top level (simple `using Lib for Type`)
+            if child.kind() == "user_defined_type" || child.kind() == "identifier" {
+                if library_name.is_none() {
+                    library_name = Some(node_text(&child, source).to_string());
+                }
+            }
+            if !cursor.goto_next_sibling() {
+                break;
+            }
+        }
+    }
+
+    let library_name = match library_name {
+        Some(n) => n,
+        None => return,
+    };
+
+    // Extract the target type from the `source` field.
+    let target_type = node.child_by_field_name("source").and_then(|t| {
+        if t.kind() == "any_source_type" {
+            None // `using X for *`
+        } else {
+            Some(node_text(&t, source).to_string())
+        }
+    });
+
+    fi.using_directives.push(UsingDirective {
+        library_name,
+        target_type,
+        scope: scope_id,
+    });
 }
 
 fn walk_import(node: &Node, scope_id: ScopeId, file_id: FileId, source: &str, fi: &mut FileIndex) {

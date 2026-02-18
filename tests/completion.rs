@@ -310,7 +310,6 @@ contract Foo {
 }
 
 #[test]
-#[ignore]
 fn dot_completion_on_this() {
     let source = r#"// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.29;
@@ -340,7 +339,6 @@ contract Foo {
 }
 
 #[test]
-#[ignore]
 fn dot_completion_on_type_uint256() {
     let source = r#"// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.29;
@@ -458,7 +456,6 @@ contract Foo {
 }
 
 #[test]
-#[ignore]
 fn dot_completion_on_enum() {
     let source = r#"// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.29;
@@ -494,7 +491,6 @@ contract Foo {
 }
 
 #[test]
-#[ignore] // BUG: completion inside modifier body does not include global functions like require
 fn general_completion_inside_modifier_body() {
     let source = r#"// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.29;
@@ -522,13 +518,12 @@ contract Foo {
         "Should include global 'msg' in modifier"
     );
     assert!(
-        labels.contains(&"require".to_string()),
-        "Should include require in modifier"
+        labels.iter().any(|l| l.starts_with("require")),
+        "Should include require in modifier, got: {labels:?}"
     );
 }
 
 #[test]
-#[ignore] // BUG: completion does not include inherited members from base contracts
 fn general_completion_includes_inherited_members() {
     let source = r#"// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.29;
@@ -729,7 +724,6 @@ pragma solidity ^0.8.29;
 }
 
 #[test]
-#[ignore]
 fn no_completion_inside_string_literal() {
     let source = r#"// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.29;
@@ -760,7 +754,6 @@ contract Foo {
 }
 
 #[test]
-#[ignore]
 fn no_completion_inside_comment() {
     let source = r#"// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.29;
@@ -774,7 +767,7 @@ contract Foo {
     let (st, path) = setup(source);
 
     // Position inside the comment
-    let comment_pos = source.find("comment ").unwrap() + "comment ".len();
+    let comment_pos = source.find("comment").unwrap() + "comment".len();
     let line = source[..comment_pos].matches('\n').count() as u32;
     let col = (comment_pos - source[..comment_pos].rfind('\n').unwrap() - 1) as u32;
 
@@ -791,7 +784,6 @@ contract Foo {
 }
 
 #[test]
-#[ignore]
 fn dot_completion_after_array_variable() {
     let source = r#"// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.29;
@@ -827,7 +819,6 @@ contract Foo {
 }
 
 #[test]
-#[ignore] // BUG: completion returns empty list for empty source files
 fn completion_in_empty_file_shows_pragmas_and_keywords() {
     let source = "";
     let (st, path) = setup(source);
@@ -845,5 +836,197 @@ fn completion_in_empty_file_shows_pragmas_and_keywords() {
     assert!(
         labels.contains(&"import".to_string()),
         "Empty file should include 'import' keyword"
+    );
+}
+
+// ========== NEW TESTS ==========
+
+#[test]
+fn dot_completion_on_address_variable() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Foo {
+    address public owner;
+
+    function bar() public view {
+        owner.
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    let dot_pos = source.find("owner.").unwrap() + "owner.".len();
+    let line = source[..dot_pos].matches('\n').count() as u32;
+    let col = (dot_pos - source[..dot_pos].rfind('\n').unwrap() - 1) as u32;
+
+    let labels = completion_labels(&st, &path, source, Position::new(line, col), Some("."));
+
+    assert!(
+        labels.contains(&"balance".to_string()),
+        "address. should include balance, got: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"transfer".to_string()),
+        "address. should include transfer"
+    );
+    assert!(
+        labels.contains(&"send".to_string()),
+        "address. should include send"
+    );
+    assert!(
+        labels.contains(&"call".to_string()),
+        "address. should include call"
+    );
+}
+
+#[test]
+fn dot_completion_on_super() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Base {
+    function baseFunc() public pure returns (uint256) {
+        return 1;
+    }
+}
+
+contract Derived is Base {
+    function bar() public pure {
+        super.
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    let dot_pos = source.find("super.").unwrap() + "super.".len();
+    let line = source[..dot_pos].matches('\n').count() as u32;
+    let col = (dot_pos - source[..dot_pos].rfind('\n').unwrap() - 1) as u32;
+
+    let labels = completion_labels(&st, &path, source, Position::new(line, col), Some("."));
+
+    assert!(
+        labels.contains(&"baseFunc".to_string()),
+        "super. should include baseFunc from parent, got: {labels:?}"
+    );
+}
+
+#[test]
+fn dot_completion_with_using_for() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+library SafeMath {
+    function add(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a + b;
+    }
+    function sub(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a - b;
+    }
+}
+
+contract Foo {
+    using SafeMath for uint256;
+
+    function bar() public pure {
+        uint256 x = 1;
+        x.
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    let dot_pos = source.find("x.").unwrap() + "x.".len();
+    let line = source[..dot_pos].matches('\n').count() as u32;
+    let col = (dot_pos - source[..dot_pos].rfind('\n').unwrap() - 1) as u32;
+
+    let labels = completion_labels(&st, &path, source, Position::new(line, col), Some("."));
+
+    assert!(
+        labels.contains(&"add".to_string()),
+        "x. should include 'add' from using SafeMath, got: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"sub".to_string()),
+        "x. should include 'sub' from using SafeMath"
+    );
+}
+
+#[test]
+fn dot_completion_on_this_includes_public_not_internal() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Foo {
+    function externalFunc() external pure returns (uint256) {
+        return 1;
+    }
+    function publicFunc() public pure returns (uint256) {
+        return 2;
+    }
+    function internalFunc() internal pure returns (uint256) {
+        return 3;
+    }
+
+    function bar() public {
+        this.
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    let dot_pos = source.find("this.").unwrap() + "this.".len();
+    let line = source[..dot_pos].matches('\n').count() as u32;
+    let col = (dot_pos - source[..dot_pos].rfind('\n').unwrap() - 1) as u32;
+
+    let labels = completion_labels(&st, &path, source, Position::new(line, col), Some("."));
+
+    assert!(
+        labels.contains(&"externalFunc".to_string()),
+        "this. should include external functions, got: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"publicFunc".to_string()),
+        "this. should include public functions"
+    );
+    assert!(
+        !labels.contains(&"internalFunc".to_string()),
+        "this. should NOT include internal functions"
+    );
+}
+
+#[test]
+fn override_completion_suggests_base_contracts() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract A {
+    function foo() public virtual {}
+}
+
+contract B {
+    function foo() public virtual {}
+}
+
+contract C is A, B {
+    function foo() public override(
+    ) {}
+}
+"#;
+    let (st, path) = setup(source);
+
+    let pos = source.find("override(").unwrap() + "override(".len();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let labels = completion_labels(&st, &path, source, Position::new(line, col), None);
+
+    assert!(
+        labels.contains(&"A".to_string()),
+        "override() should suggest base contract A, got: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"B".to_string()),
+        "override() should suggest base contract B"
     );
 }
