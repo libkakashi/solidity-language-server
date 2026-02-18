@@ -673,8 +673,15 @@ impl SymbolTable {
             None => return vec![],
         };
         let mut result = Vec::new();
-        let mut seen = FxHashSet::default();
-        self.collect_all_members(file_id, type_name, &mut result, &mut seen);
+        let mut seen_names = FxHashSet::default();
+        let mut visited = FxHashSet::default();
+        self.collect_all_members(
+            file_id,
+            type_name,
+            &mut result,
+            &mut seen_names,
+            &mut visited,
+        );
         result
     }
 
@@ -684,12 +691,16 @@ impl SymbolTable {
         file_id: FileId,
         type_name: &str,
         result: &mut Vec<MemberInfo>,
-        seen: &mut FxHashSet<String>,
+        seen_names: &mut FxHashSet<String>,
+        visited: &mut FxHashSet<DeclId>,
     ) {
         let decl_id = match find_type_declaration(self, file_id, type_name) {
             Some(id) => id,
             None => return,
         };
+        if !visited.insert(decl_id) {
+            return; // Cycle detected — already visited this declaration.
+        }
         let decl = match self.get_declaration(&decl_id) {
             Some(d) => d,
             None => return,
@@ -697,7 +708,7 @@ impl SymbolTable {
 
         // Add direct members.
         for m in decl.members() {
-            if seen.insert(m.name.clone()) {
+            if seen_names.insert(m.name.clone()) {
                 result.push(m.clone());
             }
         }
@@ -709,7 +720,7 @@ impl SymbolTable {
         ) {
             let base_names: Vec<String> = decl.base_contracts().to_vec();
             for base_name in &base_names {
-                self.collect_all_members(decl_id.file, base_name, result, seen);
+                self.collect_all_members(decl_id.file, base_name, result, seen_names, visited);
             }
         }
     }
@@ -751,10 +762,26 @@ impl SymbolTable {
         result: &mut Vec<&'a Declaration>,
         seen: &mut FxHashSet<DeclId>,
     ) {
+        let mut visited = FxHashSet::default();
+        self.collect_base_declarations_inner(origin_file, base_name, result, seen, &mut visited);
+    }
+
+    fn collect_base_declarations_inner<'a>(
+        &'a self,
+        origin_file: FileId,
+        base_name: &str,
+        result: &mut Vec<&'a Declaration>,
+        seen: &mut FxHashSet<DeclId>,
+        visited: &mut FxHashSet<DeclId>,
+    ) {
         let base_decl_id = match find_type_declaration(self, origin_file, base_name) {
             Some(id) => id,
             None => return,
         };
+        // Cycle guard: skip if we've already visited this contract.
+        if !visited.insert(base_decl_id) {
+            return;
+        }
         let base_fi = match self.files.get(&base_decl_id.file) {
             Some(fi) => fi,
             None => return,
@@ -789,7 +816,7 @@ impl SymbolTable {
         // Recursively add from grandparent bases.
         let grandparent_names: Vec<String> = base_decl.base_contracts().to_vec();
         for gp_name in &grandparent_names {
-            self.collect_base_declarations(base_decl_id.file, gp_name, result, seen);
+            self.collect_base_declarations_inner(base_decl_id.file, gp_name, result, seen, visited);
         }
     }
 
