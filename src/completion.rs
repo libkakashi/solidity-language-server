@@ -533,7 +533,7 @@ fn extract_base_contracts_from_text(before_cursor: &str) -> Option<Vec<String>> 
 // ---------------------------------------------------------------------------
 
 /// Extract `type(X)` expression before a dot, returning X (the inner type).
-fn extract_type_call_before_dot(line: &str, col_byte: u32) -> Option<String> {
+pub(crate) fn extract_type_call_before_dot(line: &str, col_byte: u32) -> Option<String> {
     let col = col_byte as usize;
     if col < 7 {
         // Minimum: "type(X)." = 8 chars, dot is at col so need at least 7 before it.
@@ -656,7 +656,7 @@ fn builtin_type_members(type_text: &str) -> Option<Vec<CompletionItem>> {
             return Some(
                 members
                     .iter()
-                    .map(|&(label, detail, _)| {
+                    .map(|&(label, detail, _, _)| {
                         let kind = if detail.starts_with("function") {
                             CompletionItemKind::METHOD
                         } else {
@@ -971,7 +971,7 @@ fn magic_members(name: &str) -> Option<Vec<CompletionItem>> {
             return Some(
                 members
                     .iter()
-                    .map(|&(label, detail, _)| CompletionItem {
+                    .map(|&(label, detail, _, _)| CompletionItem {
                         label: label.to_string(),
                         kind: Some(CompletionItemKind::PROPERTY),
                         detail: Some(detail.to_string()),

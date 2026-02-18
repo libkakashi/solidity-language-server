@@ -1208,6 +1208,10 @@ contract Token {
         text.contains("sender"),
         "Should show sender name, got: {text}"
     );
+    assert!(
+        text.contains("Sender of the message"),
+        "Should show NatSpec doc for msg.sender, got: {text}"
+    );
 }
 
 #[test]
@@ -1239,6 +1243,10 @@ contract Timer {
         text.contains("timestamp"),
         "Should show timestamp name, got: {text}"
     );
+    assert!(
+        text.contains("seconds since Unix epoch"),
+        "Should show NatSpec doc for block.timestamp, got: {text}"
+    );
 }
 
 #[test]
@@ -1269,6 +1277,10 @@ contract GasInfo {
     assert!(
         text.contains("gasprice"),
         "Should show gasprice name, got: {text}"
+    );
+    assert!(
+        text.contains("Gas price of the transaction"),
+        "Should show NatSpec doc for tx.gasprice, got: {text}"
     );
 }
 
@@ -1307,6 +1319,10 @@ contract Wallet {
         text.contains("balance"),
         "Should show balance name, got: {text}"
     );
+    assert!(
+        text.contains("Balance of the address in wei"),
+        "Should show NatSpec doc for address.balance, got: {text}"
+    );
 }
 
 #[test]
@@ -1339,6 +1355,10 @@ contract Store {
     assert!(
         text.contains("length"),
         "Should show length name, got: {text}"
+    );
+    assert!(
+        text.contains("number of elements"),
+        "Should show NatSpec doc for array.length, got: {text}"
     );
 }
 
@@ -1890,5 +1910,496 @@ contract Main {
     assert!(
         text.contains("account"),
         "Should show field name, got: {text}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Magic expression hover tests: type(X).member
+// ---------------------------------------------------------------------------
+
+#[test]
+fn hover_on_type_int256_min() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Foo {
+    function test() public pure returns (int256) {
+        return type(int256).min;
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    let pos = source.find("type(int256).min").unwrap() + "type(int256).".len();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col));
+    assert!(text.is_some(), "Should show hover for type(int256).min");
+    let text = text.unwrap();
+    assert!(
+        text.contains("int256") && text.contains("min"),
+        "Should show int256 type and min member, got: {text}"
+    );
+    assert!(
+        text.contains("smallest value representable"),
+        "Should show NatSpec doc for type(T).min, got: {text}"
+    );
+}
+
+#[test]
+fn hover_on_type_uint256_max() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Foo {
+    function test() public pure returns (uint256) {
+        return type(uint256).max;
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    let pos = source.find("type(uint256).max").unwrap() + "type(uint256).".len();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col));
+    assert!(text.is_some(), "Should show hover for type(uint256).max");
+    let text = text.unwrap();
+    assert!(
+        text.contains("uint256") && text.contains("max"),
+        "Should show uint256 type and max member, got: {text}"
+    );
+    assert!(
+        text.contains("largest value representable"),
+        "Should show NatSpec doc for type(T).max, got: {text}"
+    );
+}
+
+#[test]
+fn hover_on_type_int8_min() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Foo {
+    function test() public pure returns (int8) {
+        return type(int8).min;
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    let pos = source.find("type(int8).min").unwrap() + "type(int8).".len();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col));
+    assert!(text.is_some(), "Should show hover for type(int8).min");
+    let text = text.unwrap();
+    assert!(
+        text.contains("int8") && text.contains("min"),
+        "Should show int8 type and min member, got: {text}"
+    );
+    assert!(
+        text.contains("smallest value representable"),
+        "Should show NatSpec doc for type(T).min, got: {text}"
+    );
+}
+
+#[test]
+fn hover_on_type_enum_min_max() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Foo {
+    enum Status { Active, Paused, Ended }
+
+    function test() public pure returns (Status) {
+        return type(Status).min;
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    let pos = source.find("type(Status).min").unwrap() + "type(Status).".len();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col));
+    assert!(text.is_some(), "Should show hover for type(Status).min");
+    let text = text.unwrap();
+    assert!(
+        text.contains("Status") && text.contains("min"),
+        "Should show enum type and min member, got: {text}"
+    );
+    assert!(
+        text.contains("smallest value representable"),
+        "Should show NatSpec doc for type(Enum).min, got: {text}"
+    );
+}
+
+#[test]
+fn hover_on_type_contract_name() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract MyContract {
+    function test() public pure returns (string memory) {
+        return type(MyContract).name;
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    let pos = source.find("type(MyContract).name").unwrap() + "type(MyContract).".len();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col));
+    assert!(
+        text.is_some(),
+        "Should show hover for type(MyContract).name"
+    );
+    let text = text.unwrap();
+    assert!(
+        text.contains("string") && text.contains("name"),
+        "Should show string type and name member, got: {text}"
+    );
+    assert!(
+        text.contains("The name of the contract"),
+        "Should show NatSpec doc for type(C).name, got: {text}"
+    );
+}
+
+#[test]
+fn hover_on_type_contract_creation_code() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Factory {
+    function getCode() public pure returns (bytes memory) {
+        return type(Factory).creationCode;
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    let pos = source.find("type(Factory).creationCode").unwrap() + "type(Factory).".len();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col));
+    assert!(
+        text.is_some(),
+        "Should show hover for type(Factory).creationCode"
+    );
+    let text = text.unwrap();
+    assert!(
+        text.contains("bytes memory") && text.contains("creationCode"),
+        "Should show bytes memory type and creationCode member, got: {text}"
+    );
+    assert!(
+        text.contains("creation bytecode"),
+        "Should show NatSpec doc for type(C).creationCode, got: {text}"
+    );
+}
+
+#[test]
+fn hover_on_type_contract_runtime_code() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Factory {
+    function getCode() public pure returns (bytes memory) {
+        return type(Factory).runtimeCode;
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    let pos = source.find("type(Factory).runtimeCode").unwrap() + "type(Factory).".len();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col));
+    assert!(
+        text.is_some(),
+        "Should show hover for type(Factory).runtimeCode"
+    );
+    let text = text.unwrap();
+    assert!(
+        text.contains("bytes memory") && text.contains("runtimeCode"),
+        "Should show bytes memory type and runtimeCode member, got: {text}"
+    );
+    assert!(
+        text.contains("runtime bytecode"),
+        "Should show NatSpec doc for type(C).runtimeCode, got: {text}"
+    );
+}
+
+#[test]
+fn hover_on_type_interface_id() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+interface IERC20 {
+    function transfer(address to, uint256 amount) external returns (bool);
+}
+
+contract Foo {
+    function test() public pure returns (bytes4) {
+        return type(IERC20).interfaceId;
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    let pos = source.find("type(IERC20).interfaceId").unwrap() + "type(IERC20).".len();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col));
+    assert!(
+        text.is_some(),
+        "Should show hover for type(IERC20).interfaceId"
+    );
+    let text = text.unwrap();
+    assert!(
+        text.contains("bytes4") && text.contains("interfaceId"),
+        "Should show bytes4 type and interfaceId member, got: {text}"
+    );
+    assert!(
+        text.contains("EIP-165 interface identifier"),
+        "Should show NatSpec doc for type(I).interfaceId, got: {text}"
+    );
+}
+
+#[test]
+fn hover_on_type_interface_name() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+interface IERC20 {
+    function transfer(address to, uint256 amount) external returns (bool);
+}
+
+contract Foo {
+    function test() public pure returns (string memory) {
+        return type(IERC20).name;
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    let pos = source.find("type(IERC20).name").unwrap() + "type(IERC20).".len();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col));
+    assert!(text.is_some(), "Should show hover for type(IERC20).name");
+    let text = text.unwrap();
+    assert!(
+        text.contains("string") && text.contains("name"),
+        "Should show string type and name member, got: {text}"
+    );
+    assert!(
+        text.contains("The name of the contract"),
+        "Should show NatSpec doc for type(I).name, got: {text}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Magic expression hover tests: abi.*
+// ---------------------------------------------------------------------------
+
+#[test]
+fn hover_on_abi_encode() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Foo {
+    function test() public pure returns (bytes memory) {
+        uint256 x = 42;
+        return abi.encode(x);
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    let pos = source.find("abi.encode(x)").unwrap() + "abi.".len();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col));
+    assert!(text.is_some(), "Should show hover for abi.encode");
+    let text = text.unwrap();
+    assert!(
+        text.contains("encode"),
+        "Should show encode member, got: {text}"
+    );
+    assert!(
+        text.contains("bytes memory"),
+        "Should show return type, got: {text}"
+    );
+    assert!(
+        text.contains("ABI-encodes the given arguments"),
+        "Should show NatSpec doc for abi.encode, got: {text}"
+    );
+}
+
+#[test]
+fn hover_on_abi_decode() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Foo {
+    function test(bytes memory data) public pure returns (uint256) {
+        (uint256 val) = abi.decode(data, (uint256));
+        return val;
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    let pos = source.find("abi.decode(data").unwrap() + "abi.".len();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col));
+    assert!(text.is_some(), "Should show hover for abi.decode");
+    let text = text.unwrap();
+    assert!(
+        text.contains("decode"),
+        "Should show decode member, got: {text}"
+    );
+    assert!(
+        text.contains("ABI-decodes the given data"),
+        "Should show NatSpec doc for abi.decode, got: {text}"
+    );
+}
+
+#[test]
+fn hover_on_abi_encode_packed() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Foo {
+    function test() public pure returns (bytes memory) {
+        return abi.encodePacked(uint8(1), uint8(2));
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    let pos = source.find("abi.encodePacked(").unwrap() + "abi.".len();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col));
+    assert!(text.is_some(), "Should show hover for abi.encodePacked");
+    let text = text.unwrap();
+    assert!(
+        text.contains("encodePacked"),
+        "Should show encodePacked member, got: {text}"
+    );
+    assert!(
+        text.contains("packed encoding"),
+        "Should show NatSpec doc for abi.encodePacked, got: {text}"
+    );
+}
+
+#[test]
+fn hover_on_abi_global() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Foo {
+    function test() public pure returns (bytes memory) {
+        return abi.encode(42);
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    // Hover on "abi" itself (before the dot)
+    let pos = source.find("abi.encode(42)").unwrap();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col));
+    // abi is now a builtin global, so it should resolve
+    assert!(text.is_some(), "Should show hover for abi global");
+}
+
+// ---------------------------------------------------------------------------
+// Magic expression hover tests: string.concat / bytes.concat
+// ---------------------------------------------------------------------------
+
+#[test]
+fn hover_on_string_concat() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Foo {
+    function test() public pure returns (string memory) {
+        return string.concat("hello", " ", "world");
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    let pos = source.find("string.concat(").unwrap() + "string.".len();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col));
+    assert!(text.is_some(), "Should show hover for string.concat");
+    let text = text.unwrap();
+    assert!(
+        text.contains("string.concat"),
+        "Should show string.concat signature, got: {text}"
+    );
+    assert!(
+        text.contains("string memory"),
+        "Should show return type, got: {text}"
+    );
+    assert!(
+        text.contains("Concatenates variable number"),
+        "Should show NatSpec doc for string.concat, got: {text}"
+    );
+}
+
+#[test]
+fn hover_on_bytes_concat() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Foo {
+    function test() public pure returns (bytes memory) {
+        return bytes.concat(bytes("hello"), bytes(" "), bytes("world"));
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    let pos = source.find("bytes.concat(").unwrap() + "bytes.".len();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col));
+    assert!(text.is_some(), "Should show hover for bytes.concat");
+    let text = text.unwrap();
+    assert!(
+        text.contains("bytes.concat"),
+        "Should show bytes.concat signature, got: {text}"
+    );
+    assert!(
+        text.contains("bytes memory"),
+        "Should show return type, got: {text}"
+    );
+    assert!(
+        text.contains("Concatenates variable number"),
+        "Should show NatSpec doc for bytes.concat, got: {text}"
     );
 }

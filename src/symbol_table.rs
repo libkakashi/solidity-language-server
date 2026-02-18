@@ -12,11 +12,11 @@ type HashMap<K, V> = FxHashMap<K, V>;
 /// Base offset for synthetic built-in declarations. Real files never approach this.
 pub const SYNTHETIC_BASE: usize = usize::MAX - 1000;
 
-/// (global_name, offset, &[(member_name, type_text, member_offset)])
+/// (global_name, offset, &[(member_name, type_text, member_offset, doc)])
 pub type BuiltinDef = &'static [(
     &'static str,
     usize,
-    &'static [(&'static str, &'static str, usize)],
+    &'static [(&'static str, &'static str, usize, &'static str)],
 )];
 
 pub const BUILTIN_GLOBALS: BuiltinDef = &[
@@ -24,33 +24,45 @@ pub const BUILTIN_GLOBALS: BuiltinDef = &[
         "msg",
         SYNTHETIC_BASE,
         &[
-            ("data", "bytes calldata", SYNTHETIC_BASE + 1),
-            ("sender", "address", SYNTHETIC_BASE + 2),
-            ("sig", "bytes4", SYNTHETIC_BASE + 3),
-            ("value", "uint256", SYNTHETIC_BASE + 4),
+            ("data", "bytes calldata", SYNTHETIC_BASE + 1, "Complete calldata."),
+            ("sender", "address", SYNTHETIC_BASE + 2, "Sender of the message (current call)."),
+            ("sig", "bytes4", SYNTHETIC_BASE + 3, "First four bytes of the calldata (i.e. function identifier)."),
+            ("value", "uint256", SYNTHETIC_BASE + 4, "Number of wei sent with the message."),
         ],
     ),
     (
         "block",
         SYNTHETIC_BASE + 10,
         &[
-            ("basefee", "uint256", SYNTHETIC_BASE + 11),
-            ("blobbasefee", "uint256", SYNTHETIC_BASE + 12),
-            ("chainid", "uint256", SYNTHETIC_BASE + 13),
-            ("coinbase", "address payable", SYNTHETIC_BASE + 14),
-            ("difficulty", "uint256", SYNTHETIC_BASE + 15),
-            ("gaslimit", "uint256", SYNTHETIC_BASE + 16),
-            ("number", "uint256", SYNTHETIC_BASE + 17),
-            ("prevrandao", "uint256", SYNTHETIC_BASE + 18),
-            ("timestamp", "uint256", SYNTHETIC_BASE + 19),
+            ("basefee", "uint256", SYNTHETIC_BASE + 11, "Current block's base fee (EIP-3198 and EIP-1559)."),
+            ("blobbasefee", "uint256", SYNTHETIC_BASE + 12, "Current block's blob base fee (EIP-7516 and EIP-4844)."),
+            ("chainid", "uint256", SYNTHETIC_BASE + 13, "Current chain id."),
+            ("coinbase", "address payable", SYNTHETIC_BASE + 14, "Current block miner's address."),
+            ("difficulty", "uint256", SYNTHETIC_BASE + 15, "Current block difficulty. Deprecated in favor of prevrandao post-merge (EVM >= Paris)."),
+            ("gaslimit", "uint256", SYNTHETIC_BASE + 16, "Current block gaslimit."),
+            ("number", "uint256", SYNTHETIC_BASE + 17, "Current block number."),
+            ("prevrandao", "uint256", SYNTHETIC_BASE + 18, "Random number provided by the beacon chain (EVM >= Paris)."),
+            ("timestamp", "uint256", SYNTHETIC_BASE + 19, "Current block timestamp as seconds since Unix epoch."),
         ],
     ),
     (
         "tx",
         SYNTHETIC_BASE + 30,
         &[
-            ("gasprice", "uint256", SYNTHETIC_BASE + 31),
-            ("origin", "address", SYNTHETIC_BASE + 32),
+            ("gasprice", "uint256", SYNTHETIC_BASE + 31, "Gas price of the transaction."),
+            ("origin", "address", SYNTHETIC_BASE + 32, "Sender of the transaction (full call chain)."),
+        ],
+    ),
+    (
+        "abi",
+        SYNTHETIC_BASE + 40,
+        &[
+            ("decode", "function(bytes memory, (...)) returns (...)", SYNTHETIC_BASE + 41, "ABI-decodes the given data, while the types are given in parentheses as second argument."),
+            ("encode", "function(...) returns (bytes memory)", SYNTHETIC_BASE + 42, "ABI-encodes the given arguments."),
+            ("encodePacked", "function(...) returns (bytes memory)", SYNTHETIC_BASE + 43, "Performs packed encoding of the given arguments. Note that packed encoding can be ambiguous!"),
+            ("encodeWithSelector", "function(bytes4, ...) returns (bytes memory)", SYNTHETIC_BASE + 44, "ABI-encodes the given arguments starting from the second and prepends the given four-byte selector."),
+            ("encodeWithSignature", "function(string memory, ...) returns (bytes memory)", SYNTHETIC_BASE + 45, "Equivalent to abi.encodeWithSelector(bytes4(keccak256(bytes(signature))), ...)."),
+            ("encodeCall", "function(function, (...)) returns (bytes memory)", SYNTHETIC_BASE + 46, "ABI-encodes a call to functionPointer with the arguments found in the tuple. Performs a full type-check, ensuring the types match the function signature."),
         ],
     ),
 ];
@@ -62,39 +74,23 @@ pub const BUILTIN_TYPES: BuiltinDef = &[
         "address",
         SYNTHETIC_BASE + 100,
         &[
-            ("balance", "uint256", SYNTHETIC_BASE + 101),
-            ("code", "bytes memory", SYNTHETIC_BASE + 102),
-            ("codehash", "bytes32", SYNTHETIC_BASE + 103),
-            ("transfer", "function(uint256)", SYNTHETIC_BASE + 104),
-            (
-                "send",
-                "function(uint256) returns (bool)",
-                SYNTHETIC_BASE + 105,
-            ),
-            (
-                "call",
-                "function(bytes memory) returns (bool, bytes memory)",
-                SYNTHETIC_BASE + 106,
-            ),
-            (
-                "delegatecall",
-                "function(bytes memory) returns (bool, bytes memory)",
-                SYNTHETIC_BASE + 107,
-            ),
-            (
-                "staticcall",
-                "function(bytes memory) returns (bool, bytes memory)",
-                SYNTHETIC_BASE + 108,
-            ),
+            ("balance", "uint256", SYNTHETIC_BASE + 101, "Balance of the address in wei."),
+            ("code", "bytes memory", SYNTHETIC_BASE + 102, "Code at the address (can be empty)."),
+            ("codehash", "bytes32", SYNTHETIC_BASE + 103, "The codehash of the address."),
+            ("transfer", "function(uint256)", SYNTHETIC_BASE + 104, "Send given amount of wei to address, reverts on failure, forwards 2300 gas stipend, not adjustable."),
+            ("send", "function(uint256) returns (bool)", SYNTHETIC_BASE + 105, "Send given amount of wei to address, returns false on failure, forwards 2300 gas stipend, not adjustable."),
+            ("call", "function(bytes memory) returns (bool, bytes memory)", SYNTHETIC_BASE + 106, "Issue low-level CALL with the given payload, returns success condition and return data, forwards all available gas, adjustable."),
+            ("delegatecall", "function(bytes memory) returns (bool, bytes memory)", SYNTHETIC_BASE + 107, "Issue low-level DELEGATECALL with the given payload, returns success condition and return data, forwards all available gas, adjustable."),
+            ("staticcall", "function(bytes memory) returns (bool, bytes memory)", SYNTHETIC_BASE + 108, "Issue low-level STATICCALL with the given payload, returns success condition and return data, forwards all available gas, adjustable."),
         ],
     ),
     (
         "__builtin_array",
         SYNTHETIC_BASE + 200,
         &[
-            ("length", "uint256", SYNTHETIC_BASE + 201),
-            ("push", "function", SYNTHETIC_BASE + 202),
-            ("pop", "function", SYNTHETIC_BASE + 203),
+            ("length", "uint256", SYNTHETIC_BASE + 201, "The number of elements in the array."),
+            ("push", "function", SYNTHETIC_BASE + 202, "Appends a zero-initialized element at the end of the array and returns a reference to the element."),
+            ("pop", "function", SYNTHETIC_BASE + 203, "Removes the last element from the array."),
         ],
     ),
 ];
@@ -2339,7 +2335,7 @@ fn create_scope(
 fn inject_builtin_globals(fi: &mut FileIndex) {
     for &(global_name, global_offset, members_data) in BUILTIN_GLOBALS {
         let mut members = Vec::with_capacity(members_data.len());
-        for &(mname, mtype, moffset) in members_data {
+        for &(mname, mtype, moffset, mdoc) in members_data {
             let member_decl_id = DeclId {
                 file: fi.file_id,
                 byte_offset: moffset,
@@ -2356,7 +2352,7 @@ fn inject_builtin_globals(fi: &mut FileIndex) {
                     is_constant: false,
                     is_immutable: false,
                 }),
-                natspec: None,
+                natspec: if mdoc.is_empty() { None } else { Some(mdoc.to_string()) },
             };
             fi.declarations.insert(member_decl_id, member_decl);
             members.push(MemberInfo {
@@ -2393,7 +2389,7 @@ fn inject_builtin_globals(fi: &mut FileIndex) {
 fn inject_builtin_defs(fi: &mut FileIndex, defs: BuiltinDef, register_scope: bool) {
     for &(type_name, type_offset, members_data) in defs {
         let mut members = Vec::with_capacity(members_data.len());
-        for &(mname, mtype, moffset) in members_data {
+        for &(mname, mtype, moffset, mdoc) in members_data {
             let member_decl_id = DeclId {
                 file: fi.file_id,
                 byte_offset: moffset,
@@ -2410,7 +2406,7 @@ fn inject_builtin_defs(fi: &mut FileIndex, defs: BuiltinDef, register_scope: boo
                     is_constant: false,
                     is_immutable: false,
                 }),
-                natspec: None,
+                natspec: if mdoc.is_empty() { None } else { Some(mdoc.to_string()) },
             };
             fi.declarations.insert(member_decl_id, member_decl);
             members.push(MemberInfo {
