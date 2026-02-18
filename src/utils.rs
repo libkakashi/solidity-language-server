@@ -1,5 +1,5 @@
 use std::sync::OnceLock;
-use tower_lsp::lsp_types::PositionEncodingKind;
+use tower_lsp::lsp_types::{Position, PositionEncodingKind, Range};
 
 /// How the LSP client counts column offsets within a line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,6 +85,25 @@ impl LineIndex {
         let line_start = self.line_starts[line];
         let col = compute_column(source, line_start, byte_offset);
         (line as u32, col)
+    }
+
+    /// Convert a byte offset to an LSP `Position`.
+    pub fn byte_offset_to_lsp_position(&self, source: &str, byte_offset: usize) -> Position {
+        let (line, character) = self.byte_offset_to_position(source, byte_offset);
+        Position { line, character }
+    }
+
+    /// Convert a byte range to an LSP `Range`.
+    pub fn byte_range_to_lsp_range(
+        &self,
+        source: &str,
+        start_byte: usize,
+        end_byte: usize,
+    ) -> Range {
+        Range {
+            start: self.byte_offset_to_lsp_position(source, start_byte),
+            end: self.byte_offset_to_lsp_position(source, end_byte),
+        }
     }
 
     /// Convert an LSP (line, character) position to a byte offset. O(line_length).

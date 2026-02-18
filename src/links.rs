@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use tower_lsp::lsp_types::{DocumentLink, Position, Range, Url};
+use tower_lsp::lsp_types::{DocumentLink, Url};
 
 use crate::symbol_table::SymbolTable;
 use crate::utils::LineIndex;
@@ -49,20 +49,8 @@ pub fn document_links(
             end
         };
 
-        let (sl, sc) = line_index.byte_offset_to_position(source, inner_start);
-        let (el, ec) = line_index.byte_offset_to_position(source, inner_end);
-
         links.push(DocumentLink {
-            range: Range {
-                start: Position {
-                    line: sl,
-                    character: sc,
-                },
-                end: Position {
-                    line: el,
-                    character: ec,
-                },
-            },
+            range: line_index.byte_range_to_lsp_range(source, inner_start, inner_end),
             target: Some(uri),
             tooltip: Some(imp.source_path.clone()),
             data: None,

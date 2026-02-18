@@ -2,11 +2,11 @@
 
 use std::path::Path;
 
-use tower_lsp::lsp_types::{
-    DocumentSymbol, Location, Position, Range, SymbolInformation, SymbolKind, Url,
-};
+use tower_lsp::lsp_types::{DocumentSymbol, Location, SymbolInformation, SymbolKind, Url};
 
-use crate::symbol_table::{DeclKind, Declaration, FileIndex, ScopeKind, SymbolTable, SYNTHETIC_BASE};
+use crate::symbol_table::{
+    DeclKind, Declaration, FileIndex, SYNTHETIC_BASE, ScopeKind, SymbolTable,
+};
 use crate::utils::LineIndex;
 
 /// Extract document symbols for a single file (hierarchical tree).
@@ -86,8 +86,6 @@ pub fn workspace_symbols(st: &SymbolTable, query: &str) -> Vec<SymbolInformation
             }
 
             let container_name = find_container_name(fi, decl);
-            let (sl, sc) = ws_line_index.byte_offset_to_position(source_ref, decl.full_range.0);
-            let (el, ec) = ws_line_index.byte_offset_to_position(source_ref, decl.full_range.1);
 
             results.push(SymbolInformation {
                 name: decl.name.clone(),
@@ -96,16 +94,11 @@ pub fn workspace_symbols(st: &SymbolTable, query: &str) -> Vec<SymbolInformation
                 deprecated: None,
                 location: Location {
                     uri: uri.clone(),
-                    range: Range {
-                        start: Position {
-                            line: sl,
-                            character: sc,
-                        },
-                        end: Position {
-                            line: el,
-                            character: ec,
-                        },
-                    },
+                    range: ws_line_index.byte_range_to_lsp_range(
+                        source_ref,
+                        decl.full_range.0,
+                        decl.full_range.1,
+                    ),
                 },
                 container_name,
             });
@@ -149,8 +142,11 @@ fn collect_children(
                 d.members()
                     .iter()
                     .map(|m| {
-                        let (sl, sc) = line_index.byte_offset_to_position(source, m.name_range.0);
-                        let (el, ec) = line_index.byte_offset_to_position(source, m.name_range.1);
+                        let range = line_index.byte_range_to_lsp_range(
+                            source,
+                            m.name_range.0,
+                            m.name_range.1,
+                        );
                         DocumentSymbol {
                             name: m.name.clone(),
                             detail: Some(m.type_text.clone()),
@@ -158,26 +154,8 @@ fn collect_children(
                                 DeclKind::EnumValue => SymbolKind::ENUM_MEMBER,
                                 _ => SymbolKind::FIELD,
                             },
-                            range: Range {
-                                start: Position {
-                                    line: sl,
-                                    character: sc,
-                                },
-                                end: Position {
-                                    line: el,
-                                    character: ec,
-                                },
-                            },
-                            selection_range: Range {
-                                start: Position {
-                                    line: sl,
-                                    character: sc,
-                                },
-                                end: Position {
-                                    line: el,
-                                    character: ec,
-                                },
-                            },
+                            range,
+                            selection_range: range,
                             children: None,
                             tags: None,
                             deprecated: None,
@@ -201,35 +179,16 @@ fn make_document_symbol(
     children: Vec<DocumentSymbol>,
     line_index: &LineIndex,
 ) -> DocumentSymbol {
-    let (sl, sc) = line_index.byte_offset_to_position(source, decl.full_range.0);
-    let (el, ec) = line_index.byte_offset_to_position(source, decl.full_range.1);
-    let (nsl, nsc) = line_index.byte_offset_to_position(source, decl.name_range.0);
-    let (nel, nec) = line_index.byte_offset_to_position(source, decl.name_range.1);
-
     DocumentSymbol {
         name: decl.name.clone(),
         detail: decl.type_text.clone(),
         kind: decl_kind_to_symbol_kind(decl.kind),
-        range: Range {
-            start: Position {
-                line: sl,
-                character: sc,
-            },
-            end: Position {
-                line: el,
-                character: ec,
-            },
-        },
-        selection_range: Range {
-            start: Position {
-                line: nsl,
-                character: nsc,
-            },
-            end: Position {
-                line: nel,
-                character: nec,
-            },
-        },
+        range: line_index.byte_range_to_lsp_range(source, decl.full_range.0, decl.full_range.1),
+        selection_range: line_index.byte_range_to_lsp_range(
+            source,
+            decl.name_range.0,
+            decl.name_range.1,
+        ),
         children: if children.is_empty() {
             None
         } else {

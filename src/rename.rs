@@ -70,19 +70,7 @@ pub fn get_identifier_range(
         return None;
     }
 
-    let (start_line, start_col) = line_index.byte_offset_to_position(source, start);
-    let (end_line, end_col) = line_index.byte_offset_to_position(source, end);
-
-    Some(Range {
-        start: Position {
-            line: start_line,
-            character: start_col,
-        },
-        end: Position {
-            line: end_line,
-            character: end_col,
-        },
-    })
+    Some(line_index.byte_range_to_lsp_range(source, start, end))
 }
 
 /// Rename the symbol at `position` to `new_name`.
@@ -115,20 +103,10 @@ pub fn rename_symbol(
             decl_li_owned = LineIndex::new(decl_src);
             decl_li = &decl_li_owned;
         };
-        let (sl, sc) = decl_li.byte_offset_to_position(decl_src, decl.name_range.0);
-        let (el, ec) = decl_li.byte_offset_to_position(decl_src, decl.name_range.1);
         let uri = Url::from_file_path(decl_path).ok()?;
+        let range = decl_li.byte_range_to_lsp_range(decl_src, decl.name_range.0, decl.name_range.1);
         changes.entry(uri).or_default().push(TextEdit {
-            range: Range {
-                start: Position {
-                    line: sl,
-                    character: sc,
-                },
-                end: Position {
-                    line: el,
-                    character: ec,
-                },
-            },
+            range,
             new_text: new_name.to_string(),
         });
     }
@@ -155,20 +133,10 @@ pub fn rename_symbol(
                 None => continue,
             }
         };
-        let (sl, sc) = ref_li.byte_offset_to_position(ref_source, *start);
-        let (el, ec) = ref_li.byte_offset_to_position(ref_source, *end);
         if let Ok(uri) = Url::from_file_path(path) {
+            let range = ref_li.byte_range_to_lsp_range(ref_source, *start, *end);
             changes.entry(uri).or_default().push(TextEdit {
-                range: Range {
-                    start: Position {
-                        line: sl,
-                        character: sc,
-                    },
-                    end: Position {
-                        line: el,
-                        character: ec,
-                    },
-                },
+                range,
                 new_text: new_name.to_string(),
             });
         }

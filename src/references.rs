@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use rustc_hash::FxHashMap;
-use tower_lsp::lsp_types::{Location, Position, Range, Url};
+use tower_lsp::lsp_types::{Location, Position, Url};
 
 use crate::symbol_table::{DeclId, SymbolTable};
 use crate::utils::LineIndex;
@@ -56,22 +56,9 @@ pub fn find_references(
                 None => continue,
             }
         };
-        let (start_line, start_col) = ref_li.byte_offset_to_position(ref_source, *start);
-        let (end_line, end_col) = ref_li.byte_offset_to_position(ref_source, *end);
         if let Ok(uri) = Url::from_file_path(path) {
-            locations.push(Location {
-                uri,
-                range: Range {
-                    start: Position {
-                        line: start_line,
-                        character: start_col,
-                    },
-                    end: Position {
-                        line: end_line,
-                        character: end_col,
-                    },
-                },
-            });
+            let range = ref_li.byte_range_to_lsp_range(ref_source, *start, *end);
+            locations.push(Location { uri, range });
         }
     }
 
@@ -110,20 +97,7 @@ fn decl_id_to_location(
         li_owned = LineIndex::new(src);
         li = &li_owned;
     };
-    let (start_line, start_col) = li.byte_offset_to_position(src, decl.name_range.0);
-    let (end_line, end_col) = li.byte_offset_to_position(src, decl.name_range.1);
     let uri = Url::from_file_path(decl_path).ok()?;
-    Some(Location {
-        uri,
-        range: Range {
-            start: Position {
-                line: start_line,
-                character: start_col,
-            },
-            end: Position {
-                line: end_line,
-                character: end_col,
-            },
-        },
-    })
+    let range = li.byte_range_to_lsp_range(src, decl.name_range.0, decl.name_range.1);
+    Some(Location { uri, range })
 }

@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use tower_lsp::lsp_types::{Location, Position, Range, Url};
+use tower_lsp::lsp_types::{Location, Position, Url};
 
 use crate::symbol_table::SymbolTable;
 use crate::utils::LineIndex;
@@ -21,16 +21,7 @@ pub fn goto_definition(
             let uri = Url::from_file_path(resolved).ok()?;
             return Some(Location {
                 uri,
-                range: Range {
-                    start: Position {
-                        line: 0,
-                        character: 0,
-                    },
-                    end: Position {
-                        line: 0,
-                        character: 0,
-                    },
-                },
+                range: Default::default(),
             });
         }
     }
@@ -52,21 +43,8 @@ pub fn goto_definition(
         target_li = &target_li_owned;
     };
 
-    let (start_line, start_col) = target_li.byte_offset_to_position(target_src, decl.name_range.0);
-    let (end_line, end_col) = target_li.byte_offset_to_position(target_src, decl.name_range.1);
     let uri = Url::from_file_path(target_path).ok()?;
+    let range = target_li.byte_range_to_lsp_range(target_src, decl.name_range.0, decl.name_range.1);
 
-    Some(Location {
-        uri,
-        range: Range {
-            start: Position {
-                line: start_line,
-                character: start_col,
-            },
-            end: Position {
-                line: end_line,
-                character: end_col,
-            },
-        },
-    })
+    Some(Location { uri, range })
 }

@@ -1,4 +1,4 @@
-use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
+use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Range};
 use tree_sitter::{Parser, Tree, TreeCursor};
 
 use crate::utils::LineIndex;
@@ -67,16 +67,5 @@ pub fn node_to_lsp_range(
     source: &str,
     line_index: &LineIndex,
 ) -> Range {
-    let (start_line, start_col) = line_index.byte_offset_to_position(source, start_byte);
-    let (end_line, end_col) = line_index.byte_offset_to_position(source, end_byte);
-    Range {
-        start: Position {
-            line: start_line,
-            character: start_col,
-        },
-        end: Position {
-            line: end_line,
-            character: end_col,
-        },
-    }
+    line_index.byte_range_to_lsp_range(source, start_byte, end_byte)
 }
