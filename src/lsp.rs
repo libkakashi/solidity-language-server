@@ -289,6 +289,8 @@ impl LanguageServer for SolLsp {
                 position_encoding: Some(encoding.to_encoding_kind()),
                 definition_provider: Some(OneOf::Left(true)),
                 declaration_provider: Some(DeclarationCapability::Simple(true)),
+                type_definition_provider: Some(TypeDefinitionProviderCapability::Simple(true)),
+                implementation_provider: Some(ImplementationProviderCapability::Simple(true)),
                 references_provider: Some(OneOf::Left(true)),
                 rename_provider: Some(OneOf::Right(RenameOptions {
                     prepare_provider: Some(true),
@@ -488,6 +490,50 @@ impl LanguageServer for SolLsp {
         match goto::goto_definition(&st, &file_path, &source, position, &line_index) {
             Some(loc) => Ok(Some(request::GotoDeclarationResponse::from(loc))),
             None => Ok(None),
+        }
+    }
+
+    async fn goto_type_definition(
+        &self,
+        params: request::GotoTypeDefinitionParams,
+    ) -> tower_lsp::jsonrpc::Result<Option<request::GotoTypeDefinitionResponse>> {
+        let uri = &params.text_document_position_params.text_document.uri;
+        let position = params.text_document_position_params.position;
+
+        let (file_path, source, line_index) = match self.get_source_and_path(uri).await {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+
+        let st = self.symbol_table.read().await;
+        match goto::goto_type_definition(&st, &file_path, &source, position, &line_index) {
+            Some(loc) => Ok(Some(request::GotoTypeDefinitionResponse::from(loc))),
+            None => Ok(None),
+        }
+    }
+
+    async fn goto_implementation(
+        &self,
+        params: request::GotoImplementationParams,
+    ) -> tower_lsp::jsonrpc::Result<Option<request::GotoImplementationResponse>> {
+        let uri = &params.text_document_position_params.text_document.uri;
+        let position = params.text_document_position_params.position;
+
+        let (file_path, source, line_index) = match self.get_source_and_path(uri).await {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+
+        let st = self.symbol_table.read().await;
+        let locations = goto::goto_implementation(&st, &file_path, &source, position, &line_index);
+        if locations.is_empty() {
+            Ok(None)
+        } else if locations.len() == 1 {
+            Ok(Some(request::GotoImplementationResponse::from(
+                locations.into_iter().next().unwrap(),
+            )))
+        } else {
+            Ok(Some(request::GotoImplementationResponse::Array(locations)))
         }
     }
 

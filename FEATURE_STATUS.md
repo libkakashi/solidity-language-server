@@ -30,7 +30,7 @@
 | Document Links | **Y** | **N** | - |
 | Folding Ranges | **N** | **N** | Medium |
 | Selection Ranges | **N** | **N** | Low |
-| Semantic Tokens | **N** | **Y** | **High** |
+| Semantic Tokens | **Y** (13 types) | **Y** | ~~High~~ Done |
 | Inlay Hints | **N** | **N** | **High** |
 | Call Hierarchy | **N** | **N** | Medium |
 | Type Hierarchy | **N** | **N** | Medium |
@@ -41,7 +41,7 @@
 
 - [x] 1. Code Actions / Quick Fixes — 7 lint-driven auto-fixes
 - [x] 2. Signature Help — parameter tracking on `(` and `,`
-- [ ] 3. Semantic Tokens — syntax-aware highlighting
+- [x] 3. Semantic Tokens — 13 token types, 4 modifiers
 - [ ] 4. Go to Type Definition — variable → type navigation
 - [ ] 5. Go to Implementation — interface → concrete impl
 - [ ] 6. Inlay Hints — parameter names, type annotations
