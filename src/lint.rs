@@ -544,7 +544,7 @@ fn check_unused_imports(
     }
 
     // Pass 2: collect all identifier usages (outside import directives).
-    let mut used_names = std::collections::HashSet::new();
+    let mut used_names = rustc_hash::FxHashSet::default();
     collect_identifiers(tree.root_node(), source, &mut used_names);
 
     for (name, start_byte, end_byte) in &imports {
@@ -566,7 +566,7 @@ fn check_unused_imports(
 fn collect_identifiers<'a>(
     node: Node<'a>,
     source: &'a str,
-    used: &mut std::collections::HashSet<&'a str>,
+    used: &mut rustc_hash::FxHashSet<&'a str>,
 ) {
     if node.kind() == "import_directive" {
         return;
