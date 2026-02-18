@@ -805,12 +805,7 @@ impl SymbolTable {
     }
 
     /// Get using-for library methods that apply to a given type in a scope.
-    pub fn using_for_members(
-        &self,
-        type_text: &str,
-        path: &Path,
-        _scope_id: ScopeId,
-    ) -> Vec<MemberInfo> {
+    pub fn using_for_members(&self, type_text: &str, path: &Path) -> Vec<MemberInfo> {
         let file_id = match self.interner.lookup(path) {
             Some(id) => id,
             None => return vec![],

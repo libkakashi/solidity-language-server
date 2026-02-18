@@ -178,7 +178,7 @@ fn get_dot_completions(
             if !all.is_empty() {
                 let mut items: Vec<CompletionItem> = all.iter().map(member_to_completion).collect();
                 if let Some(ref tt) = decl.type_text {
-                    append_using_for(st, file, scope, tt, &mut items);
+                    append_using_for(st, file, tt, &mut items);
                 }
                 return items;
             }
@@ -188,7 +188,7 @@ fn get_dot_completions(
             let mut items: Vec<CompletionItem> = members.iter().map(member_to_completion).collect();
             // Also include using-for methods if the decl has a type.
             if let Some(ref tt) = decl.type_text {
-                append_using_for(st, file, scope, tt, &mut items);
+                append_using_for(st, file, tt, &mut items);
             }
             return items;
         }
@@ -214,7 +214,7 @@ fn get_dot_completions(
         if let Some(ref type_text) = decl.type_text {
             // Built-in type members (arrays, address).
             if let Some(mut items) = builtin_type_members(type_text) {
-                append_using_for(st, file, scope, type_text, &mut items);
+                append_using_for(st, file, type_text, &mut items);
                 return items;
             }
             // User-defined type members (including inherited).
@@ -222,12 +222,12 @@ fn get_dot_completions(
             if !members.is_empty() {
                 let mut items: Vec<CompletionItem> =
                     members.iter().map(member_to_completion).collect();
-                append_using_for(st, file, scope, type_text, &mut items);
+                append_using_for(st, file, type_text, &mut items);
                 return items;
             }
             // Only using-for methods.
             let mut items = Vec::new();
-            append_using_for(st, file, scope, type_text, &mut items);
+            append_using_for(st, file, type_text, &mut items);
             if !items.is_empty() {
                 return items;
             }
@@ -243,15 +243,14 @@ fn get_dot_completions(
     vec![]
 }
 
-/// Append using-for library methods that apply to `type_text` in the given scope.
+/// Append using-for library methods that apply to `type_text`.
 fn append_using_for(
     st: &SymbolTable,
     file: &Path,
-    scope: usize,
     type_text: &str,
     items: &mut Vec<CompletionItem>,
 ) {
-    let using_members = st.using_for_members(type_text, file, scope);
+    let using_members = st.using_for_members(type_text, file);
     items.extend(using_members.iter().map(member_to_completion));
 }
 
@@ -957,7 +956,7 @@ fn call_result_completions(
     // and show its instance members (including inherited) + using-for methods.
     let members = st.all_members_of(name, file);
     let mut items: Vec<CompletionItem> = members.iter().map(member_to_completion).collect();
-    append_using_for(st, file, scope, name, &mut items);
+    append_using_for(st, file, name, &mut items);
 
     if !items.is_empty() {
         return items;
@@ -972,7 +971,7 @@ fn call_result_completions(
                 let ret_type = &ret_params[0].0;
                 // Try builtin type members.
                 if let Some(mut bi) = builtin_type_members(ret_type) {
-                    append_using_for(st, file, scope, ret_type, &mut bi);
+                    append_using_for(st, file, ret_type, &mut bi);
                     return bi;
                 }
                 // Try user-defined type members (including inherited).
@@ -984,12 +983,12 @@ fn call_result_completions(
                 if !ret_members.is_empty() {
                     let mut ret_items: Vec<CompletionItem> =
                         ret_members.iter().map(member_to_completion).collect();
-                    append_using_for(st, file, scope, &base_type, &mut ret_items);
+                    append_using_for(st, file, &base_type, &mut ret_items);
                     return ret_items;
                 }
                 // Only using-for.
                 let mut ret_items = Vec::new();
-                append_using_for(st, file, scope, &base_type, &mut ret_items);
+                append_using_for(st, file, &base_type, &mut ret_items);
                 if !ret_items.is_empty() {
                     return ret_items;
                 }
