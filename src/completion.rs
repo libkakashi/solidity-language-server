@@ -29,9 +29,6 @@ pub fn handle_completion(
         }));
     }
 
-    let lines: Vec<&str> = source.lines().collect();
-    let _line = lines.get(position.line as usize)?;
-
     let abs_byte = line_index.position_to_byte_offset(source, position.line, position.character);
     let line_start_byte: usize = source[..abs_byte].rfind('\n').map(|i| i + 1).unwrap_or(0);
     let col_byte = (abs_byte - line_start_byte) as u32;
@@ -41,8 +38,15 @@ pub fn handle_completion(
             .map(|i| line_start_byte + i)
             .unwrap_or(source.len())];
 
+    // Parse once for comment/string detection (avoids redundant re-parse).
+    let mut parser = TsParser::new();
+    let tree = parser.parse(source, None);
+
     // Suppress completion inside comments and string literals.
-    if is_in_comment_or_string(source, abs_byte) {
+    if tree
+        .as_ref()
+        .is_some_and(|t| is_in_comment_or_string(t, abs_byte))
+    {
         return Some(CompletionResponse::List(CompletionList {
             is_incomplete: false,
             items: vec![],
@@ -82,17 +86,11 @@ pub fn handle_completion(
 // ---------------------------------------------------------------------------
 
 /// Check if a byte offset falls inside a comment or string literal using
-/// tree-sitter. Creating a parser and parsing is sub-millisecond for typical
-/// Solidity files, so this is negligible overhead for a completion request.
-fn is_in_comment_or_string(source: &str, byte_offset: usize) -> bool {
+/// a pre-parsed tree-sitter tree.
+fn is_in_comment_or_string(tree: &tree_sitter::Tree, byte_offset: usize) -> bool {
     if byte_offset == 0 {
         return false;
     }
-    let mut parser = TsParser::new();
-    let tree = match parser.parse(source, None) {
-        Some(t) => t,
-        None => return false,
-    };
     // Check the position just before the cursor. Tree-sitter uses half-open
     // ranges [start, end), so checking at `byte_offset` exactly can miss the
     // end boundary of comment/string nodes.
