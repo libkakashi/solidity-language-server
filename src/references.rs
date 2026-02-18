@@ -1,10 +1,9 @@
 use std::path::Path;
 
-use rustc_hash::FxHashMap;
 use tower_lsp::lsp_types::{Location, Position, Url};
 
 use crate::symbol_table::{DeclId, SymbolTable};
-use crate::utils::LineIndex;
+use crate::utils::{LineIndex, SourceCache};
 
 /// Find all references to the symbol at `position`.
 pub fn find_references(
@@ -25,40 +24,23 @@ pub fn find_references(
     let decl_id = decl.id;
     let mut locations = Vec::new();
 
+    // Collect all references using the reverse index. (Fix #18)
+    let refs = st.find_references(&decl_id);
+    let mut cache = SourceCache::new(file, source, line_index);
+
     // Include the declaration itself.
     if include_declaration {
-        if let Some(loc) = decl_id_to_location(st, &decl_id, file, source, line_index) {
+        if let Some(loc) = decl_id_to_location(st, &decl_id, &mut cache) {
             locations.push(loc);
         }
     }
 
-    // Collect all references using the reverse index. (Fix #18)
-    let refs = st.find_references(&decl_id);
-
-    // Cache file reads + LineIndex to avoid re-reading and re-indexing. (Fix #19)
-    let mut source_cache: FxHashMap<&Path, (String, LineIndex)> = FxHashMap::default();
-
     for (path, start, end) in &refs {
-        let (ref_source, ref_li) = if path.as_path() == file {
-            (source, line_index)
-        } else {
-            if !source_cache.contains_key(path.as_path()) {
-                match std::fs::read_to_string(path) {
-                    Ok(s) => {
-                        let li = LineIndex::new(&s);
-                        source_cache.insert(path.as_path(), (s, li));
-                    }
-                    Err(_) => continue,
-                }
+        if let Some((ref_source, ref_li)) = cache.get(path.as_path()) {
+            if let Ok(uri) = Url::from_file_path(path) {
+                let range = ref_li.byte_range_to_lsp_range(ref_source, *start, *end);
+                locations.push(Location { uri, range });
             }
-            match source_cache.get(path.as_path()) {
-                Some((s, li)) => (s.as_str(), li),
-                None => continue,
-            }
-        };
-        if let Ok(uri) = Url::from_file_path(path) {
-            let range = ref_li.byte_range_to_lsp_range(ref_source, *start, *end);
-            locations.push(Location { uri, range });
         }
     }
 
@@ -77,26 +59,14 @@ pub fn find_references(
     locations
 }
 
-fn decl_id_to_location(
-    st: &SymbolTable,
+fn decl_id_to_location<'a>(
+    st: &'a SymbolTable,
     decl_id: &DeclId,
-    current_file: &Path,
-    current_source: &str,
-    current_line_index: &LineIndex,
+    cache: &mut SourceCache<'a>,
 ) -> Option<Location> {
     let decl = st.get_declaration(decl_id)?;
     let decl_path = st.resolve_path(decl.id.file);
-    let (source_owned, src, li_owned);
-    let li;
-    if decl_path == current_file {
-        src = current_source;
-        li = current_line_index;
-    } else {
-        source_owned = std::fs::read_to_string(decl_path).ok()?;
-        src = &source_owned;
-        li_owned = LineIndex::new(src);
-        li = &li_owned;
-    };
+    let (src, li) = cache.get(decl_path)?;
     let uri = Url::from_file_path(decl_path).ok()?;
     let range = li.byte_range_to_lsp_range(src, decl.name_range.0, decl.name_range.1);
     Some(Location { uri, range })

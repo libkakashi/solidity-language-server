@@ -156,6 +156,53 @@ fn compute_column(source: &str, line_start: usize, byte_offset: usize) -> u32 {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Source cache — avoids redundant fs::read + LineIndex construction (Fix #19)
+// ---------------------------------------------------------------------------
+
+use std::path::Path;
+
+use rustc_hash::FxHashMap;
+
+/// Caches `(source, LineIndex)` for files that are not the "current" open file.
+/// The current file's source and line-index are passed in at construction and
+/// returned without any I/O.
+pub struct SourceCache<'a> {
+    current_file: &'a Path,
+    current_source: &'a str,
+    current_line_index: &'a LineIndex,
+    cache: FxHashMap<&'a Path, (String, LineIndex)>,
+}
+
+impl<'a> SourceCache<'a> {
+    pub fn new(
+        current_file: &'a Path,
+        current_source: &'a str,
+        current_line_index: &'a LineIndex,
+    ) -> Self {
+        Self {
+            current_file,
+            current_source,
+            current_line_index,
+            cache: FxHashMap::default(),
+        }
+    }
+
+    /// Return `(source, LineIndex)` for `path`, reading from disk at most once.
+    /// Returns `None` only when the file cannot be read.
+    pub fn get(&mut self, path: &'a Path) -> Option<(&str, &LineIndex)> {
+        if path == self.current_file {
+            return Some((self.current_source, self.current_line_index));
+        }
+        if !self.cache.contains_key(path) {
+            let s = std::fs::read_to_string(path).ok()?;
+            let li = LineIndex::new(&s);
+            self.cache.insert(path, (s, li));
+        }
+        self.cache.get(path).map(|(s, li)| (s.as_str(), li))
+    }
+}
+
 pub fn is_valid_solidity_identifier(name: &str) -> bool {
     if name.is_empty() {
         return false;

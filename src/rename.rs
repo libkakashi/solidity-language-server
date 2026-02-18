@@ -1,11 +1,10 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use rustc_hash::FxHashMap;
 use tower_lsp::lsp_types::{Position, Range, TextEdit, Url, WorkspaceEdit};
 
 use crate::symbol_table::SymbolTable;
-use crate::utils::LineIndex;
+use crate::utils::{LineIndex, SourceCache};
 
 /// Find the byte span (start, end) of the identifier at `position`.
 fn find_identifier_span(
@@ -72,57 +71,34 @@ pub fn rename_symbol(
     let decl_id = decl.id;
 
     let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+    let refs = st.find_references(&decl_id);
+    let mut cache = SourceCache::new(file, source, line_index);
 
     // Rename the declaration itself.
     {
         let decl_path = st.resolve_path(decl_id.file);
-        let (decl_source_owned, decl_src, decl_li_owned);
-        let decl_li;
-        if decl_path == file {
-            decl_src = source;
-            decl_li = line_index;
-        } else {
-            decl_source_owned = std::fs::read_to_string(decl_path).ok()?;
-            decl_src = &decl_source_owned;
-            decl_li_owned = LineIndex::new(decl_src);
-            decl_li = &decl_li_owned;
-        };
-        let uri = Url::from_file_path(decl_path).ok()?;
-        let range = decl_li.byte_range_to_lsp_range(decl_src, decl.name_range.0, decl.name_range.1);
-        changes.entry(uri).or_default().push(TextEdit {
-            range,
-            new_text: new_name.to_string(),
-        });
+        if let Some((decl_src, decl_li)) = cache.get(decl_path) {
+            if let Ok(uri) = Url::from_file_path(decl_path) {
+                let range =
+                    decl_li.byte_range_to_lsp_range(decl_src, decl.name_range.0, decl.name_range.1);
+                changes.entry(uri).or_default().push(TextEdit {
+                    range,
+                    new_text: new_name.to_string(),
+                });
+            }
+        }
     }
 
-    // Rename all references, caching file reads + LineIndex. (Fix #19)
-    let refs = st.find_references(&decl_id);
-    let mut source_cache: FxHashMap<&Path, (String, LineIndex)> = FxHashMap::default();
-
+    // Rename all references.
     for (path, start, end) in &refs {
-        let (ref_source, ref_li) = if path.as_path() == file {
-            (source, line_index)
-        } else {
-            if !source_cache.contains_key(path.as_path()) {
-                match std::fs::read_to_string(path) {
-                    Ok(s) => {
-                        let li = LineIndex::new(&s);
-                        source_cache.insert(path.as_path(), (s, li));
-                    }
-                    Err(_) => continue,
-                }
+        if let Some((ref_source, ref_li)) = cache.get(path.as_path()) {
+            if let Ok(uri) = Url::from_file_path(path) {
+                let range = ref_li.byte_range_to_lsp_range(ref_source, *start, *end);
+                changes.entry(uri).or_default().push(TextEdit {
+                    range,
+                    new_text: new_name.to_string(),
+                });
             }
-            match source_cache.get(path.as_path()) {
-                Some((s, li)) => (s.as_str(), li),
-                None => continue,
-            }
-        };
-        if let Ok(uri) = Url::from_file_path(path) {
-            let range = ref_li.byte_range_to_lsp_range(ref_source, *start, *end);
-            changes.entry(uri).or_default().push(TextEdit {
-                range,
-                new_text: new_name.to_string(),
-            });
         }
     }
 
