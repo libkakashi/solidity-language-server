@@ -11,6 +11,7 @@ pub mod lsp;
 pub mod parser;
 pub mod references;
 pub mod rename;
+pub mod signature_help;
 pub mod solar_checker;
 pub mod symbol_table;
 pub mod symbols;

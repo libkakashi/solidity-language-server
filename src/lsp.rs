@@ -10,6 +10,7 @@ use crate::lint::LintEngine;
 use crate::parser::{self, TsParser};
 use crate::references;
 use crate::rename;
+use crate::signature_help;
 use crate::solar_checker;
 use crate::symbol_table::SymbolTable;
 use crate::symbols;
@@ -298,6 +299,13 @@ impl LanguageServer for SolLsp {
                 completion_provider: Some(CompletionOptions {
                     trigger_characters: Some(vec![".".to_string()]),
                     ..Default::default()
+                }),
+                signature_help_provider: Some(SignatureHelpOptions {
+                    trigger_characters: Some(vec!["(".to_string(), ",".to_string()]),
+                    retrigger_characters: None,
+                    work_done_progress_options: WorkDoneProgressOptions {
+                        work_done_progress: Some(false),
+                    },
                 }),
                 workspace_symbol_provider: Some(OneOf::Left(true)),
                 document_symbol_provider: Some(OneOf::Left(true)),
@@ -601,6 +609,31 @@ impl LanguageServer for SolLsp {
             &source,
             position,
             trigger_char,
+            &line_index,
+            cached_tree.as_ref(),
+        ))
+    }
+
+    async fn signature_help(
+        &self,
+        params: SignatureHelpParams,
+    ) -> tower_lsp::jsonrpc::Result<Option<SignatureHelp>> {
+        let uri = &params.text_document_position_params.text_document.uri;
+        let position = params.text_document_position_params.position;
+
+        let (file_path, source, line_index) = match self.get_source_and_path(uri).await {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+
+        let cached_tree = self.tree_cache.read().await.get(uri).cloned();
+
+        let st = self.symbol_table.read().await;
+        Ok(signature_help::signature_help(
+            &st,
+            &file_path,
+            &source,
+            position,
             &line_index,
             cached_tree.as_ref(),
         ))

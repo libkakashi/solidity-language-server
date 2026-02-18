@@ -21,7 +21,7 @@
 | Find References | **Y** | **Y** | - |
 | Document Symbols | **Y** | **Y** | - |
 | Workspace Symbols | **Y** | **N** | - |
-| Code Actions / Quick Fixes | **N** | **Y** (11 fixes) | **Critical** |
+| Code Actions / Quick Fixes | **Y** (7 fixes) | **Y** (11 fixes) | ~~Critical~~ Done |
 | Code Lens | **N** | **N** | Medium |
 | Document Formatting | **Y** | **Y** | - |
 | Range Formatting | **N** | **N** | Low |
@@ -39,7 +39,7 @@
 
 ## Implementation Plan (ordered by priority)
 
-- [ ] 1. Code Actions / Quick Fixes — compiler-driven auto-fixes
+- [x] 1. Code Actions / Quick Fixes — 7 lint-driven auto-fixes
 - [ ] 2. Signature Help — parameter tracking on `(` and `,`
 - [ ] 3. Semantic Tokens — syntax-aware highlighting
 - [ ] 4. Go to Type Definition — variable → type navigation
