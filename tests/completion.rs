@@ -953,6 +953,238 @@ contract Foo {
 }
 
 #[test]
+fn dot_completion_cross_file_imported_interface() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut parser = TsParser::new();
+    let resolver = ImportResolver::with_root(tmp.path().to_path_buf());
+
+    let ierc20_source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+interface IERC20 {
+    function transfer(address to, uint256 amount) external returns (bool);
+    function balanceOf(address account) external view returns (uint256);
+}
+"#;
+    let ierc20_path = tmp.path().join("IERC20.sol");
+    std::fs::write(&ierc20_path, ierc20_source).unwrap();
+
+    let main_source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+import {IERC20} from "./IERC20.sol";
+
+contract Vault {
+    IERC20 public token;
+
+    function test() public {
+        token.
+    }
+}
+"#;
+    let main_path = tmp.path().join("Vault.sol");
+    std::fs::write(&main_path, main_source).unwrap();
+
+    let mut st = SymbolTable::new(resolver);
+    st.index_file(&ierc20_path, ierc20_source, &mut parser);
+    st.resolve_file_references(&ierc20_path, &mut parser);
+    st.index_file(&main_path, main_source, &mut parser);
+    st.resolve_file_references(&main_path, &mut parser);
+
+    let dot_pos = main_source.find("token.\n").unwrap() + "token.".len();
+    let line = main_source[..dot_pos].matches('\n').count() as u32;
+    let col = (dot_pos - main_source[..dot_pos].rfind('\n').unwrap() - 1) as u32;
+
+    let labels = completion_labels(
+        &st,
+        &main_path,
+        main_source,
+        Position::new(line, col),
+        Some("."),
+    );
+
+    eprintln!("labels: {labels:?}");
+
+    assert!(
+        labels.contains(&"transfer".to_string()),
+        "token. should include 'transfer' from imported IERC20, got: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"balanceOf".to_string()),
+        "token. should include 'balanceOf' from imported IERC20, got: {labels:?}"
+    );
+}
+
+#[test]
+fn dot_completion_cross_file_using_for() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut parser = TsParser::new();
+    let resolver = ImportResolver::with_root(tmp.path().to_path_buf());
+
+    let ierc20_source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+interface IERC20 {
+    function transfer(address to, uint256 amount) external returns (bool);
+}
+"#;
+    let ierc20_path = tmp.path().join("IERC20.sol");
+    std::fs::write(&ierc20_path, ierc20_source).unwrap();
+
+    let safelib_source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+import {IERC20} from "./IERC20.sol";
+
+library SafeERC20 {
+    function safeTransfer(IERC20 token, address to, uint256 value) internal {
+    }
+    function safeTransferFrom(IERC20 token, address from, address to, uint256 value) internal {
+    }
+}
+"#;
+    let safelib_path = tmp.path().join("SafeERC20.sol");
+    std::fs::write(&safelib_path, safelib_source).unwrap();
+
+    let main_source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+import {IERC20} from "./IERC20.sol";
+import {SafeERC20} from "./SafeERC20.sol";
+
+contract Vault {
+    using SafeERC20 for IERC20;
+    IERC20 public token;
+
+    function test() public {
+        token.
+    }
+}
+"#;
+    let main_path = tmp.path().join("Vault.sol");
+    std::fs::write(&main_path, main_source).unwrap();
+
+    let mut st = SymbolTable::new(resolver);
+    st.index_file(&ierc20_path, ierc20_source, &mut parser);
+    st.resolve_file_references(&ierc20_path, &mut parser);
+    st.index_file(&safelib_path, safelib_source, &mut parser);
+    st.resolve_file_references(&safelib_path, &mut parser);
+    st.index_file(&main_path, main_source, &mut parser);
+    st.resolve_file_references(&main_path, &mut parser);
+
+    let dot_pos = main_source.find("token.\n").unwrap() + "token.".len();
+    let line = main_source[..dot_pos].matches('\n').count() as u32;
+    let col = (dot_pos - main_source[..dot_pos].rfind('\n').unwrap() - 1) as u32;
+
+    let labels = completion_labels(
+        &st,
+        &main_path,
+        main_source,
+        Position::new(line, col),
+        Some("."),
+    );
+
+    eprintln!("labels: {labels:?}");
+
+    // Should include both direct IERC20 methods and using-for SafeERC20 methods
+    assert!(
+        labels.contains(&"transfer".to_string()),
+        "token. should include 'transfer' from IERC20, got: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"safeTransfer".to_string()),
+        "token. should include 'safeTransfer' from using SafeERC20, got: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"safeTransferFrom".to_string()),
+        "token. should include 'safeTransferFrom' from using SafeERC20, got: {labels:?}"
+    );
+}
+
+#[test]
+fn dot_completion_after_type_cast() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut parser = TsParser::new();
+    let resolver = ImportResolver::with_root(tmp.path().to_path_buf());
+
+    let ierc20_source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+interface IERC20 {
+    function transfer(address to, uint256 amount) external returns (bool);
+    function balanceOf(address account) external view returns (uint256);
+}
+"#;
+    let ierc20_path = tmp.path().join("IERC20.sol");
+    std::fs::write(&ierc20_path, ierc20_source).unwrap();
+
+    let safelib_source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+import {IERC20} from "./IERC20.sol";
+
+library SafeERC20 {
+    function safeTransferFrom(IERC20 token, address from, address to, uint256 value) internal {
+    }
+}
+"#;
+    let safelib_path = tmp.path().join("SafeERC20.sol");
+    std::fs::write(&safelib_path, safelib_source).unwrap();
+
+    let main_source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+import {IERC20} from "./IERC20.sol";
+import {SafeERC20} from "./SafeERC20.sol";
+
+contract Vault {
+    using SafeERC20 for IERC20;
+
+    function deposit(address tokenAddr, uint256 amount) external {
+        IERC20(tokenAddr).
+    }
+}
+"#;
+    let main_path = tmp.path().join("Vault.sol");
+    std::fs::write(&main_path, main_source).unwrap();
+
+    let mut st = SymbolTable::new(resolver);
+    st.index_file(&ierc20_path, ierc20_source, &mut parser);
+    st.resolve_file_references(&ierc20_path, &mut parser);
+    st.index_file(&safelib_path, safelib_source, &mut parser);
+    st.resolve_file_references(&safelib_path, &mut parser);
+    st.index_file(&main_path, main_source, &mut parser);
+    st.resolve_file_references(&main_path, &mut parser);
+
+    let dot_pos = main_source.find("IERC20(tokenAddr).").unwrap() + "IERC20(tokenAddr).".len();
+    let line = main_source[..dot_pos].matches('\n').count() as u32;
+    let col = (dot_pos - main_source[..dot_pos].rfind('\n').unwrap() - 1) as u32;
+
+    let labels = completion_labels(
+        &st,
+        &main_path,
+        main_source,
+        Position::new(line, col),
+        Some("."),
+    );
+
+    // Should include IERC20 interface methods
+    assert!(
+        labels.contains(&"transfer".to_string()),
+        "IERC20(tokenAddr). should include 'transfer', got: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"balanceOf".to_string()),
+        "IERC20(tokenAddr). should include 'balanceOf', got: {labels:?}"
+    );
+    // Should also include using-for methods from SafeERC20
+    assert!(
+        labels.contains(&"safeTransferFrom".to_string()),
+        "IERC20(tokenAddr). should include 'safeTransferFrom' via using-for, got: {labels:?}"
+    );
+}
+
+#[test]
 fn dot_completion_on_this_includes_public_not_internal() {
     let source = r#"// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.29;

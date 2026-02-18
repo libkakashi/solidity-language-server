@@ -1406,3 +1406,319 @@ contract Game {
         "Should show enum value name, got: {text}"
     );
 }
+
+#[test]
+fn hover_on_using_for_primitive_type() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+library SafeMath {
+    function add(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a + b;
+    }
+}
+
+contract Foo {
+    using SafeMath for uint256;
+
+    function bar() public pure returns (uint256) {
+        uint256 x = 1;
+        return x.add(2);
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    // Hover on "add" in "x.add(2)"
+    let pos = source.find("x.add(2)").unwrap() + "x.".len();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col));
+    assert!(
+        text.is_some(),
+        "Should show hover for using-for method on primitive type"
+    );
+    let text = text.unwrap();
+    assert!(
+        text.contains("add") && text.contains("uint256"),
+        "Should show function signature, got: {text}"
+    );
+}
+
+#[test]
+fn hover_on_using_for_struct_type() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+struct Counter {
+    uint256 value;
+}
+
+library CounterLib {
+    function increment(Counter storage c) internal {
+        c.value += 1;
+    }
+}
+
+contract Foo {
+    using CounterLib for Counter;
+    Counter private counter;
+
+    function inc() public {
+        counter.increment();
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    // Hover on "increment" in "counter.increment()"
+    let pos = source.find("counter.increment()").unwrap() + "counter.".len();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col));
+    assert!(
+        text.is_some(),
+        "Should show hover for using-for method on struct type"
+    );
+    let text = text.unwrap();
+    assert!(
+        text.contains("increment") && text.contains("Counter"),
+        "Should show function signature, got: {text}"
+    );
+}
+
+#[test]
+fn hover_on_using_for_wildcard() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+library Ops {
+    function double(uint256 x) internal pure returns (uint256) {
+        return x * 2;
+    }
+}
+
+contract Foo {
+    using Ops for *;
+
+    function bar() public pure returns (uint256) {
+        uint256 x = 5;
+        return x.double();
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    // Hover on "double" in "x.double()"
+    let pos = source.find("x.double()").unwrap() + "x.".len();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col));
+    assert!(
+        text.is_some(),
+        "Should show hover for using-for wildcard method"
+    );
+    let text = text.unwrap();
+    assert!(
+        text.contains("double"),
+        "Should show function signature, got: {text}"
+    );
+}
+
+#[test]
+fn hover_on_using_for_via_type_cast() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+interface IERC20 {
+    function transfer(address to, uint256 amount) external returns (bool);
+}
+
+library SafeERC20 {
+    function safeTransferFrom(IERC20 token, address from, address to, uint256 value) internal {
+    }
+}
+
+contract Vault {
+    using SafeERC20 for IERC20;
+
+    function deposit(address token, uint256 amount) external {
+        IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    // Hover on "safeTransferFrom" in "IERC20(token).safeTransferFrom(...)"
+    let pos = source
+        .find("IERC20(token).safeTransferFrom(msg")
+        .unwrap()
+        + "IERC20(token).".len();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col));
+    assert!(
+        text.is_some(),
+        "Should show hover for using-for method via type cast"
+    );
+    let text = text.unwrap();
+    assert!(
+        text.contains("safeTransferFrom") && text.contains("IERC20"),
+        "Should show function signature, got: {text}"
+    );
+}
+
+#[test]
+fn hover_on_using_for_cross_file_import() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut parser = TsParser::new();
+    let resolver = ImportResolver::with_root(tmp.path().to_path_buf());
+
+    let ierc20_source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+interface IERC20 {
+    function transfer(address to, uint256 amount) external returns (bool);
+    function balanceOf(address account) external view returns (uint256);
+}
+"#;
+    let ierc20_path = tmp.path().join("IERC20.sol");
+    std::fs::write(&ierc20_path, ierc20_source).unwrap();
+
+    let safelib_source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+import {IERC20} from "./IERC20.sol";
+
+library SafeERC20 {
+    function safeTransferFrom(IERC20 token, address from, address to, uint256 value) internal {
+    }
+}
+"#;
+    let safelib_path = tmp.path().join("SafeERC20.sol");
+    std::fs::write(&safelib_path, safelib_source).unwrap();
+
+    let main_source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+import {IERC20} from "./IERC20.sol";
+import {SafeERC20} from "./SafeERC20.sol";
+
+contract Vault {
+    using SafeERC20 for IERC20;
+
+    function deposit(address token, uint256 amount) external {
+        IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
+    }
+}
+"#;
+    let main_path = tmp.path().join("Vault.sol");
+    std::fs::write(&main_path, main_source).unwrap();
+
+    let mut st = SymbolTable::new(resolver);
+    st.index_file(&ierc20_path, ierc20_source, &mut parser);
+    st.resolve_file_references(&ierc20_path, &mut parser);
+    st.index_file(&safelib_path, safelib_source, &mut parser);
+    st.resolve_file_references(&safelib_path, &mut parser);
+    st.index_file(&main_path, main_source, &mut parser);
+    st.resolve_file_references(&main_path, &mut parser);
+
+    // Hover on "safeTransferFrom" in "IERC20(token).safeTransferFrom(...)"
+    let pos = main_source
+        .find("IERC20(token).safeTransferFrom(msg")
+        .unwrap()
+        + "IERC20(token).".len();
+    let line = main_source[..pos].matches('\n').count() as u32;
+    let col = (pos - main_source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(main_source, &st, &main_path, Position::new(line, col));
+    assert!(
+        text.is_some(),
+        "Should show hover for cross-file using-for method via type cast"
+    );
+    let text = text.unwrap();
+    assert!(
+        text.contains("safeTransferFrom"),
+        "Should show function name, got: {text}"
+    );
+}
+
+#[test]
+fn hover_on_using_for_cross_file_struct() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut parser = TsParser::new();
+    let resolver = ImportResolver::with_root(tmp.path().to_path_buf());
+
+    let types_source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+struct Counter {
+    uint256 value;
+}
+"#;
+    let types_path = tmp.path().join("Types.sol");
+    std::fs::write(&types_path, types_source).unwrap();
+
+    let lib_source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+import {Counter} from "./Types.sol";
+
+library CounterLib {
+    function increment(Counter storage c) internal {
+        c.value += 1;
+    }
+}
+"#;
+    let lib_path = tmp.path().join("CounterLib.sol");
+    std::fs::write(&lib_path, lib_source).unwrap();
+
+    let main_source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+import {Counter} from "./Types.sol";
+import {CounterLib} from "./CounterLib.sol";
+
+contract Foo {
+    using CounterLib for Counter;
+    Counter private counter;
+
+    function inc() public {
+        counter.increment();
+    }
+}
+"#;
+    let main_path = tmp.path().join("Foo.sol");
+    std::fs::write(&main_path, main_source).unwrap();
+
+    let mut st = SymbolTable::new(resolver);
+    st.index_file(&types_path, types_source, &mut parser);
+    st.resolve_file_references(&types_path, &mut parser);
+    st.index_file(&lib_path, lib_source, &mut parser);
+    st.resolve_file_references(&lib_path, &mut parser);
+    st.index_file(&main_path, main_source, &mut parser);
+    st.resolve_file_references(&main_path, &mut parser);
+
+    // Hover on "increment" in "counter.increment()"
+    let pos = main_source
+        .find("counter.increment()")
+        .unwrap()
+        + "counter.".len();
+    let line = main_source[..pos].matches('\n').count() as u32;
+    let col = (pos - main_source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(main_source, &st, &main_path, Position::new(line, col));
+    assert!(
+        text.is_some(),
+        "Should show hover for cross-file using-for method on imported struct"
+    );
+    let text = text.unwrap();
+    assert!(
+        text.contains("increment"),
+        "Should show function name, got: {text}"
+    );
+}

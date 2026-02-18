@@ -2740,12 +2740,19 @@ fn resolve_member(
     let container_file = container_decl_id.file;
 
     match container_kind {
-        // Namespace kinds: search members directly.
+        // Namespace kinds: search members directly, then fall back to using-for.
+        // The using-for fallback handles patterns like `IERC20(arg).safeTransferFrom()`
+        // where the type cast resolves to the interface but the method comes from a
+        // `using SafeERC20 for IERC20` directive.
         DeclKind::Contract | DeclKind::Interface | DeclKind::Library => {
-            find_member_in_scope(st, &container_decl_id, member_name)
+            find_member_in_scope(st, &container_decl_id, member_name).or_else(|| {
+                resolve_using_for_member(st, file_id, &container_decl.name, member_name)
+            })
         }
         DeclKind::Struct | DeclKind::Enum => {
-            find_member_by_decl_id(st, &container_decl_id, member_name)
+            find_member_by_decl_id(st, &container_decl_id, member_name).or_else(|| {
+                resolve_using_for_member(st, file_id, &container_decl.name, member_name)
+            })
         }
         // Variable kinds: resolve the type, then search inside it.
         DeclKind::StateVariable
@@ -2771,14 +2778,17 @@ fn resolve_member(
             // Try regular type-based member lookup first.
             if let Some(type_decl_id) = find_type_declaration(st, container_file, lookup_type) {
                 let type_decl = st.get_declaration(&type_decl_id)?;
-                match type_decl.kind {
+                let direct = match type_decl.kind {
                     DeclKind::Contract | DeclKind::Interface | DeclKind::Library => {
-                        return find_member_in_scope(st, &type_decl_id, member_name);
+                        find_member_in_scope(st, &type_decl_id, member_name)
                     }
                     DeclKind::Struct | DeclKind::Enum => {
-                        return find_member_by_decl_id(st, &type_decl_id, member_name);
+                        find_member_by_decl_id(st, &type_decl_id, member_name)
                     }
-                    _ => {}
+                    _ => None,
+                };
+                if direct.is_some() {
+                    return direct;
                 }
             }
             // Fallback: check using-for directives.
@@ -2792,17 +2802,23 @@ fn resolve_member(
             if ret_params.len() == 1 {
                 let ret_type = &ret_params[0].0;
                 let base_type = strip_type_modifiers(ret_type);
-                let type_decl_id = find_type_declaration(st, container_file, base_type)?;
-                let type_decl = st.get_declaration(&type_decl_id)?;
-                match type_decl.kind {
-                    DeclKind::Contract | DeclKind::Interface | DeclKind::Library => {
-                        find_member_in_scope(st, &type_decl_id, member_name)
+                if let Some(type_decl_id) = find_type_declaration(st, container_file, base_type) {
+                    let type_decl = st.get_declaration(&type_decl_id)?;
+                    let direct = match type_decl.kind {
+                        DeclKind::Contract | DeclKind::Interface | DeclKind::Library => {
+                            find_member_in_scope(st, &type_decl_id, member_name)
+                        }
+                        DeclKind::Struct | DeclKind::Enum => {
+                            find_member_by_decl_id(st, &type_decl_id, member_name)
+                        }
+                        _ => None,
+                    };
+                    if direct.is_some() {
+                        return direct;
                     }
-                    DeclKind::Struct | DeclKind::Enum => {
-                        find_member_by_decl_id(st, &type_decl_id, member_name)
-                    }
-                    _ => None,
                 }
+                // Fallback: check using-for directives on the return type.
+                resolve_using_for_member(st, file_id, ret_type, member_name)
             } else {
                 None
             }
@@ -3079,23 +3095,33 @@ fn resolve_import_alias_member(
                         {
                             let container_decl_id = container_decl.id;
                             let container_kind = container_decl.kind;
-                            match container_kind {
+                            let direct = match container_kind {
                                 DeclKind::Contract | DeclKind::Interface | DeclKind::Library => {
-                                    return find_member_in_scope(
+                                    find_member_in_scope(
                                         st,
                                         &container_decl_id,
                                         member_name,
-                                    );
+                                    )
                                 }
                                 DeclKind::Struct | DeclKind::Enum => {
-                                    return find_member_by_decl_id(
+                                    find_member_by_decl_id(
                                         st,
                                         &container_decl_id,
                                         member_name,
-                                    );
+                                    )
                                 }
-                                _ => {}
+                                _ => None,
+                            };
+                            if direct.is_some() {
+                                return direct;
                             }
+                            // Fallback: check using-for directives.
+                            return resolve_using_for_member(
+                                st,
+                                file_id,
+                                original_name,
+                                member_name,
+                            );
                         }
                     }
                 }

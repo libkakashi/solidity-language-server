@@ -132,6 +132,12 @@ fn get_dot_completions(
         return type_members_for(&inner_type, st, file);
     }
 
+    // Check for `SomeType(args).` — type casts like `IERC20(token).`
+    if let Some(type_name) = extract_call_before_dot(line, col_byte) {
+        let scope = st.scope_at(file, cursor_byte).unwrap_or(0);
+        return call_result_completions(st, file, &type_name, scope);
+    }
+
     let identifier = match extract_identifier_before_dot(line, col_byte) {
         Some(id) => id,
         None => return vec![],
@@ -816,6 +822,108 @@ fn decl_kind_to_completion_kind(kind: DeclKind) -> CompletionItemKind {
         DeclKind::UserDefinedType => CompletionItemKind::CLASS,
         DeclKind::ImportAlias => CompletionItemKind::MODULE,
     }
+}
+
+/// Extract the identifier before `(args).` — handles type casts like `IERC20(token).`
+/// and function calls like `getToken().`.
+fn extract_call_before_dot(line: &str, col_byte: u32) -> Option<String> {
+    let col = col_byte as usize;
+    if col < 3 {
+        // Minimum: `f().` = 4 chars, dot at col so need at least 3 before it.
+        return None;
+    }
+    let bytes = line.as_bytes();
+
+    let mut pos = col;
+    // Skip the dot.
+    if pos > 0 && pos <= bytes.len() && bytes[pos - 1] == b'.' {
+        pos -= 1;
+    }
+    // Expect ')'.
+    if pos == 0 || bytes[pos - 1] != b')' {
+        return None;
+    }
+    pos -= 1;
+
+    // Scan back to find matching '('.
+    let mut depth: u32 = 1;
+    while pos > 0 && depth > 0 {
+        pos -= 1;
+        match bytes[pos] {
+            b')' => depth += 1,
+            b'(' => depth -= 1,
+            _ => {}
+        }
+    }
+    if depth != 0 {
+        return None;
+    }
+    // `pos` now points to the opening '('. Extract the identifier before it.
+    let paren_start = pos;
+    let end = paren_start;
+    while pos > 0 && (bytes[pos - 1].is_ascii_alphanumeric() || bytes[pos - 1] == b'_') {
+        pos -= 1;
+    }
+    if pos == end {
+        return None;
+    }
+
+    Some(String::from_utf8_lossy(&bytes[pos..end]).to_string())
+}
+
+/// Provide completions for the result of a call expression `SomeType(args).`
+/// This handles type casts (IERC20(token).) and function calls (getToken().).
+fn call_result_completions(
+    st: &SymbolTable,
+    file: &Path,
+    name: &str,
+    scope: usize,
+) -> Vec<CompletionItem> {
+    // First, check if `name` is a known type (contract, interface, struct, etc.)
+    // and show its instance members + using-for methods.
+    let members = st.members_of(name, file);
+    let mut items: Vec<CompletionItem> = members.iter().map(member_to_completion).collect();
+    append_using_for(st, file, scope, name, &mut items);
+
+    if !items.is_empty() {
+        return items;
+    }
+
+    // Check if it's a function — use its return type for completions.
+    let visible = st.visible_declarations(file, scope);
+    for decl in &visible {
+        if decl.name == name && decl.kind == DeclKind::Function {
+            let ret_params = decl.return_parameters();
+            if ret_params.len() == 1 {
+                let ret_type = &ret_params[0].0;
+                // Try builtin type members.
+                if let Some(mut bi) = builtin_type_members(ret_type) {
+                    append_using_for(st, file, scope, ret_type, &mut bi);
+                    return bi;
+                }
+                // Try user-defined type members.
+                let base_type = ret_type
+                    .replace(" memory", "")
+                    .replace(" storage", "")
+                    .replace(" calldata", "");
+                let ret_members = st.members_of(&base_type, file);
+                if !ret_members.is_empty() {
+                    let mut ret_items: Vec<CompletionItem> =
+                        ret_members.iter().map(member_to_completion).collect();
+                    append_using_for(st, file, scope, &base_type, &mut ret_items);
+                    return ret_items;
+                }
+                // Only using-for.
+                let mut ret_items = Vec::new();
+                append_using_for(st, file, scope, &base_type, &mut ret_items);
+                if !ret_items.is_empty() {
+                    return ret_items;
+                }
+            }
+        }
+    }
+
+    vec![]
 }
 
 fn extract_identifier_before_dot(line: &str, col_byte: u32) -> Option<String> {
