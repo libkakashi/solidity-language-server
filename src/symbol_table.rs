@@ -165,22 +165,93 @@ pub enum DeclKind {
     ImportAlias,
 }
 
-/// Extra data only needed for certain declaration kinds. (Fix #9)
-/// Simple declarations (variables, parameters) carry no extra weight.
-#[derive(Debug, Clone, Default)]
-pub struct DeclExtras {
-    /// For functions/events/errors: parameter list as (type, name).
-    pub parameters: Vec<(String, String)>,
-    /// For functions: return parameters.
-    pub return_parameters: Vec<(String, String)>,
-    /// For contracts/interfaces: inherited type names.
+/// Resolved target information for an `ImportAlias` declaration.
+/// Populated during `enrich_import_aliases()` after all imported files are indexed.
+#[derive(Debug, Clone, Copy)]
+pub struct ImportTarget {
+    /// The target file's FileId.
+    pub file: FileId,
+    /// The target declaration (for named imports: the actual contract/struct/etc).
+    /// `None` for whole-file aliases since they don't point to a single declaration.
+    pub decl: Option<DeclId>,
+    /// The kind of the target declaration.
+    /// `None` for whole-file aliases.
+    pub kind: Option<DeclKind>,
+}
+
+// ---------------------------------------------------------------------------
+// DeclDetail — tagged union carrying kind-specific data
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct ContractDetail {
     pub base_contracts: Vec<String>,
-    /// For structs: field info. For contracts: member declarations.
     pub members: Vec<MemberInfo>,
-    /// For enums: value names.
-    pub enum_values: Vec<String>,
-    /// NatSpec from preceding comment nodes.
-    pub natspec: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CallableDetail {
+    pub visibility: Option<String>,
+    pub state_mutability: Option<String>,
+    pub parameters: Vec<(String, String)>,
+    pub return_parameters: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone)]
+pub struct EventDetail {
+    pub parameters: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ErrorDetail {
+    pub parameters: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone)]
+pub struct StructDetail {
+    pub members: Vec<MemberInfo>,
+}
+
+#[derive(Debug, Clone)]
+pub struct EnumDetail {
+    pub members: Vec<MemberInfo>,
+    pub values: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct VariableDetail {
+    pub type_text: Option<String>,
+    pub visibility: Option<String>,
+    pub is_constant: bool,
+    pub is_immutable: bool,
+}
+
+#[derive(Debug, Clone)]
+pub enum DeclDetail {
+    Contract(Box<ContractDetail>),
+    Interface(Box<ContractDetail>),
+    Library(Box<ContractDetail>),
+
+    Function(Box<CallableDetail>),
+    Constructor(Box<CallableDetail>),
+    Fallback(Box<CallableDetail>),
+    Receive(Box<CallableDetail>),
+    Modifier(Box<CallableDetail>),
+
+    Event(Box<EventDetail>),
+    Error(Box<ErrorDetail>),
+
+    Struct(Box<StructDetail>),
+    Enum(Box<EnumDetail>),
+    EnumValue { type_text: Option<String> },
+    UserDefinedType,
+
+    StateVariable(VariableDetail),
+    LocalVariable(VariableDetail),
+    Parameter(VariableDetail),
+    Constant(VariableDetail),
+
+    Import(Option<ImportTarget>),
 }
 
 /// A single declaration extracted from the CST.
@@ -188,73 +259,160 @@ pub struct DeclExtras {
 pub struct Declaration {
     pub id: DeclId,
     pub name: String,
-    pub kind: DeclKind,
     /// Byte range of the entire declaration node.
     pub full_range: (usize, usize),
     /// Byte range of just the name identifier.
     pub name_range: (usize, usize),
     /// Scope this declaration lives in.
     pub scope: ScopeId,
-    /// Syntactic type text (e.g. "uint256", "address payable").
-    pub type_text: Option<String>,
-    pub visibility: Option<String>,
-    pub state_mutability: Option<String>,
-    pub is_constant: bool,
-    pub is_immutable: bool,
-    /// Heavy fields only allocated when needed. (Fix #9)
-    pub extras: Option<Box<DeclExtras>>,
+    /// Kind-specific data.
+    pub detail: DeclDetail,
+    /// NatSpec documentation.
+    pub natspec: Option<String>,
 }
 
 impl Declaration {
-    /// Get parameters (returns empty slice if none).
+    /// Derive the DeclKind from the detail discriminant.
+    pub fn kind(&self) -> DeclKind {
+        match &self.detail {
+            DeclDetail::Contract(_) => DeclKind::Contract,
+            DeclDetail::Interface(_) => DeclKind::Interface,
+            DeclDetail::Library(_) => DeclKind::Library,
+            DeclDetail::Function(_) => DeclKind::Function,
+            DeclDetail::Constructor(_) => DeclKind::Constructor,
+            DeclDetail::Fallback(_) | DeclDetail::Receive(_) => DeclKind::FallbackReceive,
+            DeclDetail::Modifier(_) => DeclKind::Modifier,
+            DeclDetail::Event(_) => DeclKind::Event,
+            DeclDetail::Error(_) => DeclKind::Error,
+            DeclDetail::Struct(_) => DeclKind::Struct,
+            DeclDetail::Enum(_) => DeclKind::Enum,
+            DeclDetail::EnumValue { .. } => DeclKind::EnumValue,
+            DeclDetail::UserDefinedType => DeclKind::UserDefinedType,
+            DeclDetail::StateVariable(_) => DeclKind::StateVariable,
+            DeclDetail::LocalVariable(_) => DeclKind::LocalVariable,
+            DeclDetail::Parameter(_) => DeclKind::Parameter,
+            DeclDetail::Constant(_) => DeclKind::Constant,
+            DeclDetail::Import(_) => DeclKind::ImportAlias,
+        }
+    }
+
+    pub fn type_text(&self) -> Option<&str> {
+        match &self.detail {
+            DeclDetail::StateVariable(v)
+            | DeclDetail::LocalVariable(v)
+            | DeclDetail::Parameter(v)
+            | DeclDetail::Constant(v) => v.type_text.as_deref(),
+            DeclDetail::EnumValue { type_text } => type_text.as_deref(),
+            _ => None,
+        }
+    }
+
+    pub fn visibility(&self) -> Option<&str> {
+        match &self.detail {
+            DeclDetail::Function(c)
+            | DeclDetail::Constructor(c)
+            | DeclDetail::Fallback(c)
+            | DeclDetail::Receive(c)
+            | DeclDetail::Modifier(c) => c.visibility.as_deref(),
+            DeclDetail::StateVariable(v)
+            | DeclDetail::LocalVariable(v)
+            | DeclDetail::Parameter(v)
+            | DeclDetail::Constant(v) => v.visibility.as_deref(),
+            _ => None,
+        }
+    }
+
+    pub fn state_mutability(&self) -> Option<&str> {
+        match &self.detail {
+            DeclDetail::Function(c)
+            | DeclDetail::Constructor(c)
+            | DeclDetail::Fallback(c)
+            | DeclDetail::Receive(c)
+            | DeclDetail::Modifier(c) => c.state_mutability.as_deref(),
+            _ => None,
+        }
+    }
+
+    pub fn is_constant(&self) -> bool {
+        match &self.detail {
+            DeclDetail::StateVariable(v)
+            | DeclDetail::LocalVariable(v)
+            | DeclDetail::Parameter(v)
+            | DeclDetail::Constant(v) => v.is_constant,
+            _ => false,
+        }
+    }
+
+    pub fn is_immutable(&self) -> bool {
+        match &self.detail {
+            DeclDetail::StateVariable(v)
+            | DeclDetail::LocalVariable(v)
+            | DeclDetail::Parameter(v)
+            | DeclDetail::Constant(v) => v.is_immutable,
+            _ => false,
+        }
+    }
+
     pub fn parameters(&self) -> &[(String, String)] {
-        self.extras
-            .as_ref()
-            .map(|e| e.parameters.as_slice())
-            .unwrap_or(&[])
+        match &self.detail {
+            DeclDetail::Function(c)
+            | DeclDetail::Constructor(c)
+            | DeclDetail::Fallback(c)
+            | DeclDetail::Receive(c)
+            | DeclDetail::Modifier(c) => &c.parameters,
+            DeclDetail::Event(e) => &e.parameters,
+            DeclDetail::Error(e) => &e.parameters,
+            _ => &[],
+        }
     }
 
-    /// Get return parameters (returns empty slice if none).
     pub fn return_parameters(&self) -> &[(String, String)] {
-        self.extras
-            .as_ref()
-            .map(|e| e.return_parameters.as_slice())
-            .unwrap_or(&[])
+        match &self.detail {
+            DeclDetail::Function(c)
+            | DeclDetail::Constructor(c)
+            | DeclDetail::Fallback(c)
+            | DeclDetail::Receive(c)
+            | DeclDetail::Modifier(c) => &c.return_parameters,
+            _ => &[],
+        }
     }
 
-    /// Get base contracts (returns empty slice if none).
     pub fn base_contracts(&self) -> &[String] {
-        self.extras
-            .as_ref()
-            .map(|e| e.base_contracts.as_slice())
-            .unwrap_or(&[])
+        match &self.detail {
+            DeclDetail::Contract(c) | DeclDetail::Interface(c) | DeclDetail::Library(c) => {
+                &c.base_contracts
+            }
+            _ => &[],
+        }
     }
 
-    /// Get members (returns empty slice if none).
     pub fn members(&self) -> &[MemberInfo] {
-        self.extras
-            .as_ref()
-            .map(|e| e.members.as_slice())
-            .unwrap_or(&[])
+        match &self.detail {
+            DeclDetail::Contract(c) | DeclDetail::Interface(c) | DeclDetail::Library(c) => {
+                &c.members
+            }
+            DeclDetail::Struct(s) => &s.members,
+            DeclDetail::Enum(e) => &e.members,
+            _ => &[],
+        }
     }
 
-    /// Get enum values (returns empty slice if none).
     pub fn enum_values(&self) -> &[String] {
-        self.extras
-            .as_ref()
-            .map(|e| e.enum_values.as_slice())
-            .unwrap_or(&[])
+        match &self.detail {
+            DeclDetail::Enum(e) => &e.values,
+            _ => &[],
+        }
     }
 
-    /// Get NatSpec documentation (returns None if none).
     pub fn natspec(&self) -> Option<&str> {
-        self.extras.as_ref().and_then(|e| e.natspec.as_deref())
+        self.natspec.as_deref()
     }
 
-    /// Get or create mutable extras.
-    fn extras_mut(&mut self) -> &mut DeclExtras {
-        self.extras
-            .get_or_insert_with(|| Box::new(DeclExtras::default()))
+    pub fn import_target(&self) -> Option<&ImportTarget> {
+        match &self.detail {
+            DeclDetail::Import(t) => t.as_ref(),
+            _ => None,
+        }
     }
 }
 
@@ -552,6 +710,10 @@ impl SymbolTable {
             self.ensure_indexed(p, parser);
         }
 
+        // Populate ImportAlias declarations with target info now that all
+        // imported files are indexed.
+        enrich_import_aliases(self, file_id);
+
         // Resolve references — we need to work with indices to avoid borrow issues.
         resolve_references(self, file_id);
     }
@@ -718,7 +880,7 @@ impl SymbolTable {
 
         // Check current file
         for decl in fi.declarations.values() {
-            if decl.name == type_name && is_member_bearing_kind(decl.kind) {
+            if decl.name == type_name && is_member_bearing_kind(decl.kind()) {
                 let members = decl.members();
                 if !members.is_empty() {
                     return members;
@@ -732,7 +894,7 @@ impl SymbolTable {
                 if let Some(target_fid) = self.interner.lookup(resolved) {
                     if let Some(target_fi) = self.files.get(&target_fid) {
                         for decl in target_fi.declarations.values() {
-                            if decl.name == type_name && is_member_bearing_kind(decl.kind) {
+                            if decl.name == type_name && is_member_bearing_kind(decl.kind()) {
                                 let members = decl.members();
                                 if !members.is_empty() {
                                     return members;
@@ -798,7 +960,7 @@ impl SymbolTable {
 
         // Recurse into base contracts.
         if matches!(
-            decl.kind,
+            decl.kind(),
             DeclKind::Contract | DeclKind::Interface | DeclKind::Library
         ) {
             for base_name in decl.base_contracts() {
@@ -880,7 +1042,7 @@ impl SymbolTable {
                     if seen.insert(*decl_id) {
                         if let Some(decl) = base_fi.declarations.get(decl_id) {
                             // Skip private members.
-                            if decl.visibility.as_deref() != Some("private") {
+                            if decl.visibility() != Some("private") {
                                 result.push(decl);
                             }
                         }
@@ -1212,14 +1374,15 @@ fn walk_children(
 // Declaration walkers
 // ---------------------------------------------------------------------------
 
-/// Helper to create a minimal declaration with no extras.
+/// Helper to create a declaration with the given detail.
 fn make_decl(
     file_id: FileId,
     name_node: &Node,
     node: &Node,
     source: &str,
-    kind: DeclKind,
+    detail: DeclDetail,
     scope: ScopeId,
+    natspec: Option<String>,
 ) -> (DeclId, Declaration) {
     let name = node_text(name_node, source).to_string();
     let decl_id = DeclId {
@@ -1229,16 +1392,11 @@ fn make_decl(
     let decl = Declaration {
         id: decl_id,
         name,
-        kind,
         full_range: (node.start_byte(), node.end_byte()),
         name_range: (name_node.start_byte(), name_node.end_byte()),
         scope,
-        type_text: None,
-        visibility: None,
-        state_mutability: None,
-        is_constant: false,
-        is_immutable: false,
-        extras: None,
+        detail,
+        natspec,
     };
     (decl_id, decl)
 }
@@ -1372,16 +1530,24 @@ fn walk_contract(
     }
 
     let natspec = extract_natspec(node, source);
-    let (decl_id, mut decl) = make_decl(file_id, &name_node, node, source, kind, parent_scope);
-
-    if !base_contracts.is_empty() || !members.is_empty() {
-        let extras = decl.extras_mut();
-        extras.base_contracts = base_contracts;
-        extras.members = members;
-    }
-    if natspec.is_some() {
-        decl.extras_mut().natspec = natspec;
-    }
+    let contract_detail = Box::new(ContractDetail {
+        base_contracts,
+        members,
+    });
+    let detail = match kind {
+        DeclKind::Interface => DeclDetail::Interface(contract_detail),
+        DeclKind::Library => DeclDetail::Library(contract_detail),
+        _ => DeclDetail::Contract(contract_detail),
+    };
+    let (decl_id, decl) = make_decl(
+        file_id,
+        &name_node,
+        node,
+        source,
+        detail,
+        parent_scope,
+        natspec,
+    );
 
     // Link the contract scope back to its owning declaration.
     fi.scopes[contract_scope].owner = Some(decl_id);
@@ -1414,25 +1580,21 @@ fn walk_function(
     let state_mutability = extract_child_kind(node, "state_mutability", source);
     let natspec = extract_natspec(node, source);
 
-    let (decl_id, mut decl) = make_decl(
+    let detail = DeclDetail::Function(Box::new(CallableDetail {
+        visibility,
+        state_mutability,
+        parameters,
+        return_parameters,
+    }));
+    let (decl_id, decl) = make_decl(
         file_id,
         &name_node,
         node,
         source,
-        DeclKind::Function,
+        detail,
         parent_scope,
+        natspec,
     );
-    decl.visibility = visibility;
-    decl.state_mutability = state_mutability;
-    if natspec.is_some() {
-        decl.extras_mut().natspec = natspec;
-    }
-
-    if !parameters.is_empty() || !return_parameters.is_empty() {
-        let extras = decl.extras_mut();
-        extras.parameters = parameters;
-        extras.return_parameters = return_parameters;
-    }
 
     let name = decl.name.clone();
     fi.declarations.insert(decl_id, decl);
@@ -1469,27 +1631,20 @@ fn walk_constructor(
         byte_offset: node.start_byte(),
     };
 
-    let mut decl = Declaration {
+    let decl = Declaration {
         id: decl_id,
         name: "constructor".to_string(),
-        kind: DeclKind::Constructor,
         full_range: (node.start_byte(), node.end_byte()),
         name_range: (node.start_byte(), node.start_byte() + "constructor".len()),
         scope: parent_scope,
-        type_text: None,
-        visibility: None,
-        state_mutability: None,
-        is_constant: false,
-        is_immutable: false,
-        extras: None,
+        detail: DeclDetail::Constructor(Box::new(CallableDetail {
+            visibility: None,
+            state_mutability: None,
+            parameters,
+            return_parameters: Vec::new(),
+        })),
+        natspec,
     };
-
-    if natspec.is_some() {
-        decl.extras_mut().natspec = natspec;
-    }
-    if !parameters.is_empty() {
-        decl.extras_mut().parameters = parameters;
-    }
 
     fi.declarations.insert(decl_id, decl);
 
@@ -1523,27 +1678,26 @@ fn walk_fallback_receive(
         byte_offset: node.start_byte(),
     };
 
-    let mut decl = Declaration {
+    let callable = Box::new(CallableDetail {
+        visibility: extract_child_kind(node, "visibility", source),
+        state_mutability: extract_child_kind(node, "state_mutability", source),
+        parameters,
+        return_parameters: Vec::new(),
+    });
+    let detail = if name == "receive" {
+        DeclDetail::Receive(callable)
+    } else {
+        DeclDetail::Fallback(callable)
+    };
+    let decl = Declaration {
         id: decl_id,
         name: name.to_string(),
-        kind: DeclKind::FallbackReceive,
         full_range: (node.start_byte(), node.end_byte()),
         name_range: (node.start_byte(), node.start_byte() + name.len()),
         scope: parent_scope,
-        type_text: None,
-        visibility: extract_child_kind(node, "visibility", source),
-        state_mutability: extract_child_kind(node, "state_mutability", source),
-        is_constant: false,
-        is_immutable: false,
-        extras: None,
+        detail,
+        natspec,
     };
-
-    if natspec.is_some() {
-        decl.extras_mut().natspec = natspec;
-    }
-    if !parameters.is_empty() {
-        decl.extras_mut().parameters = parameters;
-    }
 
     fi.declarations.insert(decl_id, decl);
 
@@ -1570,21 +1724,21 @@ fn walk_modifier(
     let parameters = extract_parameters(node, source, fi, mod_scope, file_id);
     let natspec = extract_natspec(node, source);
 
-    let (decl_id, mut decl) = make_decl(
+    let detail = DeclDetail::Modifier(Box::new(CallableDetail {
+        visibility: None,
+        state_mutability: None,
+        parameters,
+        return_parameters: Vec::new(),
+    }));
+    let (decl_id, decl) = make_decl(
         file_id,
         &name_node,
         node,
         source,
-        DeclKind::Modifier,
+        detail,
         parent_scope,
+        natspec,
     );
-    if natspec.is_some() {
-        decl.extras_mut().natspec = natspec;
-    }
-
-    if !parameters.is_empty() {
-        decl.extras_mut().parameters = parameters;
-    }
 
     let name = decl.name.clone();
     fi.declarations.insert(decl_id, decl);
@@ -1618,21 +1772,13 @@ fn walk_state_variable(
     let is_immutable = has_child_kind(node, "immutable");
     let natspec = extract_natspec(node, source);
 
-    let (decl_id, mut decl) = make_decl(
-        file_id,
-        &name_node,
-        node,
-        source,
-        DeclKind::StateVariable,
-        scope_id,
-    );
-    decl.type_text = type_text;
-    decl.visibility = visibility;
-    decl.is_constant = is_constant;
-    decl.is_immutable = is_immutable;
-    if natspec.is_some() {
-        decl.extras_mut().natspec = natspec;
-    }
+    let detail = DeclDetail::StateVariable(VariableDetail {
+        type_text,
+        visibility,
+        is_constant,
+        is_immutable,
+    });
+    let (decl_id, decl) = make_decl(file_id, &name_node, node, source, detail, scope_id, natspec);
 
     let name = decl.name.clone();
     fi.declarations.insert(decl_id, decl);
@@ -1662,19 +1808,13 @@ fn walk_constant_variable(
         .map(|t| node_text(&t, source).to_string());
     let natspec = extract_natspec(node, source);
 
-    let (decl_id, mut decl) = make_decl(
-        file_id,
-        &name_node,
-        node,
-        source,
-        DeclKind::Constant,
-        scope_id,
-    );
-    decl.type_text = type_text;
-    decl.is_constant = true;
-    if natspec.is_some() {
-        decl.extras_mut().natspec = natspec;
-    }
+    let detail = DeclDetail::Constant(VariableDetail {
+        type_text,
+        visibility: None,
+        is_constant: true,
+        is_immutable: false,
+    });
+    let (decl_id, decl) = make_decl(file_id, &name_node, node, source, detail, scope_id, natspec);
 
     let name = decl.name.clone();
     fi.declarations.insert(decl_id, decl);
@@ -1709,15 +1849,21 @@ fn walk_struct(node: &Node, scope_id: ScopeId, file_id: FileId, source: &str, fi
                             .unwrap_or_default();
 
                         // Register struct field as a Declaration.
-                        let (field_decl_id, mut field_decl) = make_decl(
+                        let field_detail = DeclDetail::StateVariable(VariableDetail {
+                            type_text: Some(mtype.clone()),
+                            visibility: None,
+                            is_constant: false,
+                            is_immutable: false,
+                        });
+                        let (field_decl_id, field_decl) = make_decl(
                             file_id,
                             &mname,
                             &child,
                             source,
-                            DeclKind::StateVariable,
+                            field_detail,
                             scope_id,
+                            None,
                         );
-                        field_decl.type_text = Some(mtype.clone());
                         fi.declarations.insert(field_decl_id, field_decl);
 
                         members.push(MemberInfo {
@@ -1736,21 +1882,8 @@ fn walk_struct(node: &Node, scope_id: ScopeId, file_id: FileId, source: &str, fi
         }
     }
 
-    let (decl_id, mut decl) = make_decl(
-        file_id,
-        &name_node,
-        node,
-        source,
-        DeclKind::Struct,
-        scope_id,
-    );
-    if natspec.is_some() {
-        decl.extras_mut().natspec = natspec;
-    }
-
-    if !members.is_empty() {
-        decl.extras_mut().members = members;
-    }
+    let detail = DeclDetail::Struct(Box::new(StructDetail { members }));
+    let (decl_id, decl) = make_decl(file_id, &name_node, node, source, detail, scope_id, natspec);
 
     let name = decl.name.clone();
     fi.declarations.insert(decl_id, decl);
@@ -1783,16 +1916,13 @@ fn walk_enum(node: &Node, scope_id: ScopeId, file_id: FileId, source: &str, fi: 
                     let val_decl = Declaration {
                         id: val_decl_id,
                         name: val_name.clone(),
-                        kind: DeclKind::EnumValue,
                         full_range: (child.start_byte(), child.end_byte()),
                         name_range: (child.start_byte(), child.end_byte()),
                         scope: scope_id,
-                        type_text: Some(enum_name.clone()),
-                        visibility: None,
-                        state_mutability: None,
-                        is_constant: false,
-                        is_immutable: false,
-                        extras: None,
+                        detail: DeclDetail::EnumValue {
+                            type_text: Some(enum_name.clone()),
+                        },
+                        natspec: None,
                     };
                     fi.declarations.insert(val_decl_id, val_decl);
 
@@ -1813,17 +1943,11 @@ fn walk_enum(node: &Node, scope_id: ScopeId, file_id: FileId, source: &str, fi: 
         }
     }
 
-    let (decl_id, mut decl) =
-        make_decl(file_id, &name_node, node, source, DeclKind::Enum, scope_id);
-    if natspec.is_some() {
-        decl.extras_mut().natspec = natspec;
-    }
-
-    if !enum_values.is_empty() || !members.is_empty() {
-        let extras = decl.extras_mut();
-        extras.members = members;
-        extras.enum_values = enum_values;
-    }
+    let detail = DeclDetail::Enum(Box::new(EnumDetail {
+        members,
+        values: enum_values,
+    }));
+    let (decl_id, decl) = make_decl(file_id, &name_node, node, source, detail, scope_id, natspec);
 
     let name = decl.name.clone();
     fi.declarations.insert(decl_id, decl);
@@ -1862,15 +1986,8 @@ fn walk_event(node: &Node, scope_id: ScopeId, file_id: FileId, source: &str, fi:
         }
     }
 
-    let (decl_id, mut decl) =
-        make_decl(file_id, &name_node, node, source, DeclKind::Event, scope_id);
-    if natspec.is_some() {
-        decl.extras_mut().natspec = natspec;
-    }
-
-    if !params.is_empty() {
-        decl.extras_mut().parameters = params;
-    }
+    let detail = DeclDetail::Event(Box::new(EventDetail { parameters: params }));
+    let (decl_id, decl) = make_decl(file_id, &name_node, node, source, detail, scope_id, natspec);
 
     let name = decl.name.clone();
     fi.declarations.insert(decl_id, decl);
@@ -1915,15 +2032,8 @@ fn walk_error_decl(
         }
     }
 
-    let (decl_id, mut decl) =
-        make_decl(file_id, &name_node, node, source, DeclKind::Error, scope_id);
-    if natspec.is_some() {
-        decl.extras_mut().natspec = natspec;
-    }
-
-    if !params.is_empty() {
-        decl.extras_mut().parameters = params;
-    }
+    let detail = DeclDetail::Error(Box::new(ErrorDetail { parameters: params }));
+    let (decl_id, decl) = make_decl(file_id, &name_node, node, source, detail, scope_id, natspec);
 
     let name = decl.name.clone();
     fi.declarations.insert(decl_id, decl);
@@ -1947,8 +2057,9 @@ fn walk_user_defined_type_def(
         &name_node,
         node,
         source,
-        DeclKind::UserDefinedType,
+        DeclDetail::UserDefinedType,
         scope_id,
+        None,
     );
     let name = decl.name.clone();
     fi.declarations.insert(decl_id, decl);
@@ -2064,16 +2175,11 @@ fn walk_import(node: &Node, scope_id: ScopeId, file_id: FileId, source: &str, fi
         let decl = Declaration {
             id: decl_id,
             name: alias_text.clone(),
-            kind: DeclKind::ImportAlias,
             full_range: (node.start_byte(), node.end_byte()),
             name_range: (alias_node.start_byte(), alias_node.end_byte()),
             scope: scope_id,
-            type_text: None,
-            visibility: None,
-            state_mutability: None,
-            is_constant: false,
-            is_immutable: false,
-            extras: None,
+            detail: DeclDetail::Import(None),
+            natspec: None,
         };
         fi.declarations.insert(decl_id, decl);
         register_in_scope(fi, scope_id, &alias_text, &decl_id);
@@ -2094,16 +2200,11 @@ fn walk_import(node: &Node, scope_id: ScopeId, file_id: FileId, source: &str, fi
                     let decl = Declaration {
                         id: decl_id,
                         name: local_name.clone(),
-                        kind: DeclKind::ImportAlias,
                         full_range: (node.start_byte(), node.end_byte()),
                         name_range: (name_node.start_byte(), name_node.end_byte()),
                         scope: scope_id,
-                        type_text: None,
-                        visibility: None,
-                        state_mutability: None,
-                        is_constant: false,
-                        is_immutable: false,
-                        extras: None,
+                        detail: DeclDetail::Import(None),
+                        natspec: None,
                     };
                     fi.declarations.insert(decl_id, decl);
                     register_in_scope(fi, scope_id, local_name, &decl_id);
@@ -2148,15 +2249,14 @@ fn walk_variable_decl_stmt(
                         .child_by_field_name("type")
                         .map(|t| node_text(&t, source).to_string());
 
-                    let (decl_id, mut decl) = make_decl(
-                        file_id,
-                        &name_node,
-                        &child,
-                        source,
-                        DeclKind::LocalVariable,
-                        scope_id,
-                    );
-                    decl.type_text = type_text;
+                    let detail = DeclDetail::LocalVariable(VariableDetail {
+                        type_text,
+                        visibility: None,
+                        is_constant: false,
+                        is_immutable: false,
+                    });
+                    let (decl_id, decl) =
+                        make_decl(file_id, &name_node, &child, source, detail, scope_id, None);
 
                     let name = decl.name.clone();
                     fi.declarations.insert(decl_id, decl);
@@ -2177,15 +2277,15 @@ fn walk_variable_decl_stmt(
                                         .child_by_field_name("type")
                                         .map(|t| node_text(&t, source).to_string());
 
-                                    let (decl_id, mut decl) = make_decl(
-                                        file_id,
-                                        &name_node,
-                                        &tc,
-                                        source,
-                                        DeclKind::LocalVariable,
-                                        scope_id,
+                                    let detail = DeclDetail::LocalVariable(VariableDetail {
+                                        type_text,
+                                        visibility: None,
+                                        is_constant: false,
+                                        is_immutable: false,
+                                    });
+                                    let (decl_id, decl) = make_decl(
+                                        file_id, &name_node, &tc, source, detail, scope_id, None,
                                     );
-                                    decl.type_text = type_text;
 
                                     let name = decl.name.clone();
                                     fi.declarations.insert(decl_id, decl);
@@ -2242,16 +2342,16 @@ fn inject_builtin_globals(fi: &mut FileIndex) {
             let member_decl = Declaration {
                 id: member_decl_id,
                 name: mname.to_string(),
-                kind: DeclKind::StateVariable,
                 full_range: (moffset, moffset),
                 name_range: (moffset, moffset),
                 scope: 0,
-                type_text: Some(mtype.to_string()),
-                visibility: None,
-                state_mutability: None,
-                is_constant: false,
-                is_immutable: false,
-                extras: None,
+                detail: DeclDetail::StateVariable(VariableDetail {
+                    type_text: Some(mtype.to_string()),
+                    visibility: None,
+                    is_constant: false,
+                    is_immutable: false,
+                }),
+                natspec: None,
             };
             fi.declarations.insert(member_decl_id, member_decl);
             members.push(MemberInfo {
@@ -2267,21 +2367,15 @@ fn inject_builtin_globals(fi: &mut FileIndex) {
             file: fi.file_id,
             byte_offset: global_offset,
         };
-        let mut global_decl = Declaration {
+        let global_decl = Declaration {
             id: global_decl_id,
             name: global_name.to_string(),
-            kind: DeclKind::Struct,
             full_range: (global_offset, global_offset),
             name_range: (global_offset, global_offset),
             scope: 0,
-            type_text: None,
-            visibility: None,
-            state_mutability: None,
-            is_constant: false,
-            is_immutable: false,
-            extras: None,
+            detail: DeclDetail::Struct(Box::new(StructDetail { members })),
+            natspec: None,
         };
-        global_decl.extras_mut().members = members;
         fi.declarations.insert(global_decl_id, global_decl);
         register_in_scope(fi, 0, global_name, &global_decl_id);
     }
@@ -2302,16 +2396,16 @@ fn inject_builtin_defs(fi: &mut FileIndex, defs: BuiltinDef, register_scope: boo
             let member_decl = Declaration {
                 id: member_decl_id,
                 name: mname.to_string(),
-                kind: DeclKind::StateVariable,
                 full_range: (moffset, moffset),
                 name_range: (moffset, moffset),
                 scope: 0,
-                type_text: Some(mtype.to_string()),
-                visibility: None,
-                state_mutability: None,
-                is_constant: false,
-                is_immutable: false,
-                extras: None,
+                detail: DeclDetail::StateVariable(VariableDetail {
+                    type_text: Some(mtype.to_string()),
+                    visibility: None,
+                    is_constant: false,
+                    is_immutable: false,
+                }),
+                natspec: None,
             };
             fi.declarations.insert(member_decl_id, member_decl);
             members.push(MemberInfo {
@@ -2327,21 +2421,15 @@ fn inject_builtin_defs(fi: &mut FileIndex, defs: BuiltinDef, register_scope: boo
             file: fi.file_id,
             byte_offset: type_offset,
         };
-        let mut type_decl = Declaration {
+        let type_decl = Declaration {
             id: type_decl_id,
             name: type_name.to_string(),
-            kind: DeclKind::Struct,
             full_range: (type_offset, type_offset),
             name_range: (type_offset, type_offset),
             scope: 0,
-            type_text: None,
-            visibility: None,
-            state_mutability: None,
-            is_constant: false,
-            is_immutable: false,
-            extras: None,
+            detail: DeclDetail::Struct(Box::new(StructDetail { members })),
+            natspec: None,
         };
-        type_decl.extras_mut().members = members;
         fi.declarations.insert(type_decl_id, type_decl);
         if register_scope {
             register_in_scope(fi, 0, type_name, &type_decl_id);
@@ -2382,15 +2470,14 @@ fn extract_parameters(
                     .unwrap_or_default();
 
                 if let Some(name_node) = child.child_by_field_name("name") {
-                    let (decl_id, mut decl) = make_decl(
-                        file_id,
-                        &name_node,
-                        &child,
-                        source,
-                        DeclKind::Parameter,
-                        fn_scope,
-                    );
-                    decl.type_text = Some(ptype.clone());
+                    let detail = DeclDetail::Parameter(VariableDetail {
+                        type_text: Some(ptype.clone()),
+                        visibility: None,
+                        is_constant: false,
+                        is_immutable: false,
+                    });
+                    let (decl_id, decl) =
+                        make_decl(file_id, &name_node, &child, source, detail, fn_scope, None);
 
                     let pname_clone = decl.name.clone();
                     fi.declarations.insert(decl_id, decl);
@@ -2426,15 +2513,14 @@ fn declare_parameters_as_locals(
                         .child_by_field_name("type")
                         .map(|t| node_text(&t, source).to_string());
 
-                    let (decl_id, mut decl) = make_decl(
-                        file_id,
-                        &name_node,
-                        &child,
-                        source,
-                        DeclKind::LocalVariable,
-                        scope_id,
-                    );
-                    decl.type_text = type_text;
+                    let detail = DeclDetail::LocalVariable(VariableDetail {
+                        type_text,
+                        visibility: None,
+                        is_constant: false,
+                        is_immutable: false,
+                    });
+                    let (decl_id, decl) =
+                        make_decl(file_id, &name_node, &child, source, detail, scope_id, None);
 
                     let name = decl.name.clone();
                     fi.declarations.insert(decl_id, decl);
@@ -2504,15 +2590,14 @@ fn extract_return_parameters(
                     .unwrap_or_default();
 
                 if let Some(name_node) = child.child_by_field_name("name") {
-                    let (decl_id, mut decl) = make_decl(
-                        file_id,
-                        &name_node,
-                        &child,
-                        source,
-                        DeclKind::Parameter,
-                        fn_scope,
-                    );
-                    decl.type_text = Some(ptype.clone());
+                    let detail = DeclDetail::Parameter(VariableDetail {
+                        type_text: Some(ptype.clone()),
+                        visibility: None,
+                        is_constant: false,
+                        is_immutable: false,
+                    });
+                    let (decl_id, decl) =
+                        make_decl(file_id, &name_node, &child, source, detail, fn_scope, None);
 
                     let pname_clone = decl.name.clone();
                     fi.declarations.insert(decl_id, decl);
@@ -2706,6 +2791,98 @@ fn find_top_level_by_name<'a>(fi: &'a FileIndex, name: &str) -> Option<&'a Decla
 }
 
 // ---------------------------------------------------------------------------
+// Import alias enrichment
+// ---------------------------------------------------------------------------
+
+/// Populate `import_target` on `ImportAlias` declarations so that downstream
+/// code can resolve them without re-traversing the import list.
+fn enrich_import_aliases(st: &mut SymbolTable, file_id: FileId) {
+    // Collect the work we need to do without holding a mutable borrow.
+    // Each entry: (alias_decl_id, target_file, Option<(target_decl_id, target_kind)>)
+    let updates: Vec<(DeclId, ImportTarget)> = {
+        let fi = match st.files.get(&file_id) {
+            Some(fi) => fi,
+            None => return,
+        };
+        let mut result = Vec::new();
+        for imp in &fi.imports {
+            let target_fid = match imp
+                .resolved_path
+                .as_ref()
+                .and_then(|p| st.interner.lookup(p))
+            {
+                Some(fid) => fid,
+                None => continue,
+            };
+            match &imp.kind {
+                ImportKind::Alias(alias_name) => {
+                    // Whole-file alias: find the ImportAlias decl by name.
+                    for decl in fi.declarations.values() {
+                        if decl.kind() == DeclKind::ImportAlias && decl.name == *alias_name {
+                            result.push((
+                                decl.id,
+                                ImportTarget {
+                                    file: target_fid,
+                                    decl: None,
+                                    kind: None,
+                                },
+                            ));
+                            break;
+                        }
+                    }
+                }
+                ImportKind::Named(names) => {
+                    // Named import: each name maps to a specific target declaration.
+                    for (original_name, alias) in names {
+                        let local_name = alias.as_ref().unwrap_or(original_name);
+                        // Find the local ImportAlias declaration.
+                        let alias_decl_id = fi.declarations.values().find_map(|decl| {
+                            if decl.kind() == DeclKind::ImportAlias && decl.name == *local_name {
+                                Some(decl.id)
+                            } else {
+                                None
+                            }
+                        });
+                        let alias_decl_id = match alias_decl_id {
+                            Some(id) => id,
+                            None => continue,
+                        };
+                        // Look up the target declaration in the imported file.
+                        let target_info = st.files.get(&target_fid).and_then(|target_fi| {
+                            find_top_level_by_name(target_fi, original_name)
+                                .map(|d| (d.id, d.kind()))
+                        });
+                        let (target_decl_id, target_kind) = match target_info {
+                            Some((id, kind)) => (Some(id), Some(kind)),
+                            None => (None, None),
+                        };
+                        result.push((
+                            alias_decl_id,
+                            ImportTarget {
+                                file: target_fid,
+                                decl: target_decl_id,
+                                kind: target_kind,
+                            },
+                        ));
+                    }
+                }
+                ImportKind::Glob => {}
+            }
+        }
+        result
+    };
+
+    // Apply the updates.
+    if let Some(fi) = st.files.get_mut(&file_id) {
+        for (decl_id, target) in updates {
+            if let Some(decl) = fi.declarations.get_mut(&decl_id) {
+                decl.detail = DeclDetail::Import(Some(target));
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Reference resolution (Fix #22 — minimal cloning)
 // ---------------------------------------------------------------------------
 
@@ -2868,7 +3045,7 @@ fn resolve_single(
             ImportKind::Alias(alias) => {
                 if alias == name {
                     for decl in fi.declarations.values() {
-                        if decl.name == name && decl.kind == DeclKind::ImportAlias {
+                        if decl.name == name && decl.kind() == DeclKind::ImportAlias {
                             return Some(decl.id);
                         }
                     }
@@ -2914,7 +3091,7 @@ fn resolve_member(
 
     // 2. Get the container declaration.
     let container_decl = st.get_declaration(&container_decl_id)?;
-    let container_kind = container_decl.kind;
+    let container_kind = container_decl.kind();
     let container_file = container_decl_id.file;
 
     match container_kind {
@@ -2949,7 +3126,10 @@ fn resolve_member(
         | DeclKind::LocalVariable
         | DeclKind::Parameter
         | DeclKind::Constant => {
-            let type_text = st.get_declaration(&container_decl_id)?.type_text.clone()?;
+            let type_text = st
+                .get_declaration(&container_decl_id)?
+                .type_text()
+                .map(|s| s.to_string())?;
 
             // Check for array types first (type_text contains '[').
             if type_text.contains('[') {
@@ -2968,7 +3148,7 @@ fn resolve_member(
             // Try regular type-based member lookup first.
             if let Some(type_decl_id) = find_type_declaration(st, container_file, lookup_type) {
                 let type_decl = st.get_declaration(&type_decl_id)?;
-                let direct = match type_decl.kind {
+                let direct = match type_decl.kind() {
                     DeclKind::Contract | DeclKind::Interface | DeclKind::Library => {
                         find_member_in_scope(st, &type_decl_id, member_name).or_else(|| {
                             for base_name in type_decl.base_contracts() {
@@ -3006,7 +3186,7 @@ fn resolve_member(
                 let base_type = strip_type_modifiers(ret_type);
                 if let Some(type_decl_id) = find_type_declaration(st, container_file, base_type) {
                     let type_decl = st.get_declaration(&type_decl_id)?;
-                    let direct = match type_decl.kind {
+                    let direct = match type_decl.kind() {
                         DeclKind::Contract | DeclKind::Interface | DeclKind::Library => {
                             find_member_in_scope(st, &type_decl_id, member_name).or_else(|| {
                                 for bn in type_decl.base_contracts() {
@@ -3175,7 +3355,7 @@ fn find_type_declaration(st: &SymbolTable, origin_file: FileId, type_name: &str)
         // Resolve the container (contract/library/interface/import alias).
         let container_id = find_type_declaration_simple(st, origin_file, container_name)?;
         let container_decl = st.get_declaration(&container_id)?;
-        return match container_decl.kind {
+        return match container_decl.kind() {
             DeclKind::Contract | DeclKind::Interface | DeclKind::Library => {
                 find_member_in_scope(st, &container_id, member_name)
                     .or_else(|| find_member_by_decl_id(st, &container_id, member_name))
@@ -3191,59 +3371,36 @@ fn find_type_declaration(st: &SymbolTable, origin_file: FileId, type_name: &str)
 }
 
 /// Resolve a type name inside an import alias target file.
+/// Uses pre-computed `import_target` to avoid re-traversing the import list.
 fn resolve_import_alias_type(
     st: &SymbolTable,
-    file_id: FileId,
+    _file_id: FileId,
     alias_decl_id: &DeclId,
     member_name: &str,
 ) -> Option<DeclId> {
-    let fi = st.files.get(&file_id)?;
-    let alias_decl = fi.declarations.get(alias_decl_id)?;
-    let alias_name = &alias_decl.name;
+    let alias_decl = st.get_declaration(alias_decl_id)?;
+    let target = alias_decl.import_target()?;
 
-    for imp in &fi.imports {
-        let original_name = match &imp.kind {
-            ImportKind::Alias(alias) if alias == alias_name => None, // whole-file alias
-            ImportKind::Named(names) => names
-                .iter()
-                .find(|(name, al)| {
-                    let local = al.as_ref().unwrap_or(name);
-                    local == alias_name
-                })
-                .map(|(name, _)| name.as_str()),
-            _ => continue,
-        };
-
-        let resolved_path = imp.resolved_path.as_ref()?;
-        let target_fid = st.interner.lookup(resolved_path)?;
-        let target_fi = st.files.get(&target_fid)?;
-
-        if original_name.is_none() {
-            // Whole-file alias (`import "X" as Alias`): search top-level.
-            if let Some(decl) = find_top_level_by_name(target_fi, member_name) {
-                if is_member_bearing_kind(decl.kind) {
-                    return Some(decl.id);
-                }
+    if let Some(target_decl_id) = target.decl {
+        // Named import: search the target declaration's scope for the type.
+        let target_decl = st.get_declaration(&target_decl_id)?;
+        match target_decl.kind() {
+            DeclKind::Contract | DeclKind::Interface | DeclKind::Library => {
+                find_member_in_scope(st, &target_decl_id, member_name)
+                    .or_else(|| find_member_by_decl_id(st, &target_decl_id, member_name))
             }
+            _ => find_member_by_decl_id(st, &target_decl_id, member_name),
+        }
+    } else {
+        // Whole-file alias: search target file's top-level.
+        let target_fi = st.files.get(&target.file)?;
+        let decl = find_top_level_by_name(target_fi, member_name)?;
+        if is_member_bearing_kind(decl.kind()) {
+            Some(decl.id)
         } else {
-            // Named import: the alias refers to a specific type — search its scope.
-            let orig = original_name.unwrap();
-            if let Some(container_decl) = find_top_level_by_name(target_fi, orig) {
-                let cid = container_decl.id;
-                let result = match container_decl.kind {
-                    DeclKind::Contract | DeclKind::Interface | DeclKind::Library => {
-                        find_member_in_scope(st, &cid, member_name)
-                            .or_else(|| find_member_by_decl_id(st, &cid, member_name))
-                    }
-                    _ => find_member_by_decl_id(st, &cid, member_name),
-                };
-                if result.is_some() {
-                    return result;
-                }
-            }
+            None
         }
     }
-    None
 }
 
 /// Simple (non-qualified) type declaration lookup.
@@ -3257,7 +3414,7 @@ fn find_type_declaration_simple(
     if let Some(fi) = st.files.get(&origin_file) {
         // Search current file.
         for decl in fi.declarations.values() {
-            if decl.name == type_name && is_member_bearing_kind(decl.kind) {
+            if decl.name == type_name && is_member_bearing_kind(decl.kind()) {
                 return Some(decl.id);
             }
         }
@@ -3275,7 +3432,7 @@ fn find_type_declaration_simple(
     for target_fid in import_fids {
         if let Some(target_fi) = st.files.get(&target_fid) {
             if let Some(decl) = find_top_level_by_name(target_fi, type_name) {
-                if is_member_bearing_kind(decl.kind) {
+                if is_member_bearing_kind(decl.kind()) {
                     return Some(decl.id);
                 }
             }
@@ -3326,81 +3483,48 @@ fn strip_type_modifiers(type_text: &str) -> &str {
 }
 
 /// Resolve `Alias.Member` where `Alias` is an import alias.
-/// Handles both `import "X" as Alias` and `import {Name} from "X"` where
-/// `Name` is a contract/library/interface and `Member` is accessed via dot.
+/// Uses pre-computed `import_target` to avoid re-traversing the import list.
 fn resolve_import_alias_member(
     st: &SymbolTable,
     file_id: FileId,
     alias_decl_id: &DeclId,
     member_name: &str,
 ) -> Option<DeclId> {
-    let fi = st.files.get(&file_id)?;
-    let alias_decl = fi.declarations.get(alias_decl_id)?;
-    let alias_name = &alias_decl.name;
+    let alias_decl = st.get_declaration(alias_decl_id)?;
+    let target = alias_decl.import_target()?;
 
-    for imp in &fi.imports {
-        let matches = match &imp.kind {
-            ImportKind::Alias(alias) => alias == alias_name,
-            ImportKind::Named(names) => names.iter().any(|(name, al)| {
-                let local = al.as_ref().unwrap_or(name);
-                local == alias_name
-            }),
-            ImportKind::Glob => false,
-        };
-        if !matches {
-            continue;
-        }
-
-        if let Some(ref resolved_path) = imp.resolved_path {
-            if let Some(target_fid) = st.interner.lookup(resolved_path) {
-                if let Some(target_fi) = st.files.get(&target_fid) {
-                    // For Alias imports, search top-level declarations.
-                    if matches!(imp.kind, ImportKind::Alias(_)) {
-                        if let Some(decl) = find_top_level_by_name(target_fi, member_name) {
-                            return Some(decl.id);
+    if let Some(target_decl_id) = target.decl {
+        // Named import: target is a specific contract/library/struct/etc.
+        let target_decl = st.get_declaration(&target_decl_id)?;
+        let direct = match target_decl.kind() {
+            DeclKind::Contract | DeclKind::Interface | DeclKind::Library => {
+                find_member_in_scope(st, &target_decl_id, member_name).or_else(|| {
+                    for base_name in target_decl.base_contracts() {
+                        if let Some(found) = resolve_in_base_contract(
+                            st,
+                            target_decl_id.file,
+                            base_name,
+                            member_name,
+                        ) {
+                            return Some(found);
                         }
                     }
-                    // For Named imports, the alias is a specific type — search its
-                    // scope for the member (e.g. MathLib.add where MathLib is a library).
-                    if let ImportKind::Named(names) = &imp.kind {
-                        let original_name = names
-                            .iter()
-                            .find(|(name, al)| {
-                                let local = al.as_ref().unwrap_or(name);
-                                local == alias_name
-                            })
-                            .map(|(name, _)| name.as_str())
-                            .unwrap_or(alias_name);
-                        // Find the actual declaration (contract/library/interface) in the target file.
-                        if let Some(container_decl) =
-                            find_top_level_by_name(target_fi, original_name)
-                        {
-                            let container_decl_id = container_decl.id;
-                            let container_kind = container_decl.kind;
-                            let direct = match container_kind {
-                                DeclKind::Contract | DeclKind::Interface | DeclKind::Library => {
-                                    find_member_in_scope(st, &container_decl_id, member_name)
-                                }
-                                DeclKind::Struct | DeclKind::Enum => {
-                                    find_member_by_decl_id(st, &container_decl_id, member_name)
-                                }
-                                _ => None,
-                            };
-                            if direct.is_some() {
-                                return direct;
-                            }
-                            // Fallback: check using-for directives.
-                            return resolve_using_for_member(
-                                st,
-                                file_id,
-                                original_name,
-                                member_name,
-                            );
-                        }
-                    }
-                }
+                    None
+                })
             }
+            DeclKind::Struct | DeclKind::Enum => {
+                find_member_by_decl_id(st, &target_decl_id, member_name)
+            }
+            _ => None,
+        };
+        if direct.is_some() {
+            return direct;
         }
+        // Fallback: check using-for directives.
+        resolve_using_for_member(st, file_id, &target_decl.name, member_name)
+    } else {
+        // Whole-file alias: search target file's top-level declarations.
+        let target_fi = st.files.get(&target.file)?;
+        find_top_level_by_name(target_fi, member_name).map(|d| d.id)
     }
-    None
 }

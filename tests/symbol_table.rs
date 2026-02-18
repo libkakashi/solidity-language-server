@@ -37,7 +37,7 @@ contract Foo {
     assert!(names.contains(&"bar"), "names: {names:?}");
 
     let foo = fi.declarations.values().find(|d| d.name == "Foo").unwrap();
-    assert_eq!(foo.kind, DeclKind::Contract);
+    assert_eq!(foo.kind(), DeclKind::Contract);
     assert_eq!(foo.members().len(), 2);
 }
 
@@ -58,7 +58,7 @@ contract Foo {
         .values()
         .find(|d| d.name == "Point")
         .unwrap();
-    assert_eq!(point.kind, DeclKind::Struct);
+    assert_eq!(point.kind(), DeclKind::Struct);
     assert_eq!(point.members().len(), 2);
     assert_eq!(point.members()[0].name, "x");
     assert_eq!(point.members()[1].name, "y");
@@ -108,7 +108,7 @@ contract Foo {
     let x_decl = fi
         .declarations
         .values()
-        .find(|d| d.name == "x" && d.kind == DeclKind::LocalVariable)
+        .find(|d| d.name == "x" && d.kind() == DeclKind::LocalVariable)
         .unwrap();
     assert_eq!(x_refs[0].resolved.as_ref().unwrap(), &x_decl.id);
 }
@@ -127,7 +127,7 @@ contract Foo {
         .values()
         .find(|d| d.name == "Status")
         .unwrap();
-    assert_eq!(status.kind, DeclKind::Enum);
+    assert_eq!(status.kind(), DeclKind::Enum);
     assert_eq!(status.enum_values(), &["Active", "Inactive", "Paused"]);
     assert_eq!(status.members().len(), 3);
 }
@@ -193,7 +193,7 @@ contract Foo {
     assert!(decl.is_some(), "Should resolve x");
     let decl = decl.unwrap();
     assert_eq!(decl.name, "x");
-    assert_eq!(decl.kind, DeclKind::StateVariable);
+    assert_eq!(decl.kind(), DeclKind::StateVariable);
 }
 
 #[test]
@@ -251,8 +251,8 @@ contract Foo {
     let (st, path) = index(source);
     let fi = get_fi(&st, &path);
     let x = fi.declarations.values().find(|d| d.name == "x").unwrap();
-    // Local variables should have no extras allocated.
-    assert!(x.extras.is_none(), "local var should not allocate extras");
+    // Local variables should use the LocalVariable detail variant.
+    assert_eq!(x.kind(), DeclKind::LocalVariable);
 }
 
 #[test]
@@ -283,7 +283,7 @@ contract Pool {
         .get_declaration(fee_ref.resolved.as_ref().unwrap())
         .unwrap();
     assert_eq!(fee_decl.name, "FeeUpdated");
-    assert_eq!(fee_decl.kind, DeclKind::Event);
+    assert_eq!(fee_decl.kind(), DeclKind::Event);
 }
 
 #[test]
@@ -318,7 +318,7 @@ contract Foo {
         .get_declaration(x_ref.resolved.as_ref().unwrap())
         .unwrap();
     assert_eq!(x_decl.name, "x");
-    assert_eq!(x_decl.type_text.as_deref(), Some("uint256"));
+    assert_eq!(x_decl.type_text(), Some("uint256"));
 }
 
 #[test]
@@ -345,7 +345,7 @@ contract Foo {
         .get_declaration(active_ref.resolved.as_ref().unwrap())
         .unwrap();
     assert_eq!(active_decl.name, "Active");
-    assert_eq!(active_decl.kind, DeclKind::EnumValue);
+    assert_eq!(active_decl.kind(), DeclKind::EnumValue);
 }
 
 #[test]
@@ -411,7 +411,7 @@ contract Foo {
         .get_declaration(add_ref.resolved.as_ref().unwrap())
         .unwrap();
     assert_eq!(add_decl.name, "add");
-    assert_eq!(add_decl.kind, DeclKind::Function);
+    assert_eq!(add_decl.kind(), DeclKind::Function);
 }
 
 // ---- Diagnostic tests to find resolution bugs ----
@@ -963,7 +963,7 @@ contract Foo {
         "resolve_at on function parameter 'amount' in body should work"
     );
     assert_eq!(decl.unwrap().name, "amount");
-    assert_eq!(decl.unwrap().kind, DeclKind::Parameter);
+    assert_eq!(decl.unwrap().kind(), DeclKind::Parameter);
 }
 
 #[test]
@@ -996,7 +996,7 @@ contract Foo {
         if let Some(ref decl_id) = r.resolved {
             let decl = st.get_declaration(decl_id).unwrap();
             assert_ne!(
-                decl.kind,
+                decl.kind(),
                 DeclKind::StateVariable,
                 "x in struct literal should not resolve to state variable x"
             );
@@ -1725,7 +1725,7 @@ contract Foo {
     let result_decl = fi
         .declarations
         .values()
-        .find(|d| d.name == "result" && d.kind == DeclKind::LocalVariable);
+        .find(|d| d.name == "result" && d.kind() == DeclKind::LocalVariable);
     assert!(
         result_decl.is_some(),
         "result in try returns should be declared"
@@ -1735,7 +1735,7 @@ contract Foo {
     let reason_decl = fi
         .declarations
         .values()
-        .find(|d| d.name == "reason" && d.kind == DeclKind::LocalVariable);
+        .find(|d| d.name == "reason" && d.kind() == DeclKind::LocalVariable);
     assert!(
         reason_decl.is_some(),
         "reason in catch clause should be declared"
@@ -1764,12 +1764,12 @@ contract Foo {
     let a = fi
         .declarations
         .values()
-        .find(|d| d.name == "a" && d.kind == DeclKind::LocalVariable)
+        .find(|d| d.name == "a" && d.kind() == DeclKind::LocalVariable)
         .expect("a should be declared");
     let b = fi
         .declarations
         .values()
-        .find(|d| d.name == "b" && d.kind == DeclKind::LocalVariable)
+        .find(|d| d.name == "b" && d.kind() == DeclKind::LocalVariable)
         .expect("b should be declared inside unchecked block");
 
     // b should be in a deeper scope than a
@@ -1803,7 +1803,7 @@ contract Foo {
     let helper = fi
         .declarations
         .values()
-        .find(|d| d.name == "helper" && d.kind == DeclKind::Function)
+        .find(|d| d.name == "helper" && d.kind() == DeclKind::Function)
         .expect("free function helper should be declared");
     let params = helper.parameters();
     assert_eq!(params.len(), 1);
@@ -1878,7 +1878,7 @@ contract Foo {
     let process_decls: Vec<_> = fi
         .declarations
         .values()
-        .filter(|d| d.name == "process" && d.kind == DeclKind::Function)
+        .filter(|d| d.name == "process" && d.kind() == DeclKind::Function)
         .collect();
     assert_eq!(
         process_decls.len(),
@@ -1910,7 +1910,7 @@ contract Foo {
     let x_decls: Vec<_> = fi
         .declarations
         .values()
-        .filter(|d| d.name == "x" && d.kind == DeclKind::LocalVariable)
+        .filter(|d| d.name == "x" && d.kind() == DeclKind::LocalVariable)
         .collect();
     assert_eq!(
         x_decls.len(),
@@ -1955,10 +1955,10 @@ contract Foo {
     let allowances = fi
         .declarations
         .values()
-        .find(|d| d.name == "allowances" && d.kind == DeclKind::StateVariable)
+        .find(|d| d.name == "allowances" && d.kind() == DeclKind::StateVariable)
         .expect("allowances should be declared");
     assert!(
-        allowances.type_text.is_some(),
+        allowances.type_text().is_some(),
         "allowances should have type_text"
     );
 
@@ -1985,9 +1985,9 @@ contract Foo {
     let matrix = fi
         .declarations
         .values()
-        .find(|d| d.name == "matrix" && d.kind == DeclKind::StateVariable)
+        .find(|d| d.name == "matrix" && d.kind() == DeclKind::StateVariable)
         .expect("matrix should be declared");
-    assert!(matrix.type_text.is_some(), "matrix should have type_text");
+    assert!(matrix.type_text().is_some(), "matrix should have type_text");
 
     // "matrix" reference should resolve
     let pos = source.find("return matrix[").unwrap() + "return ".len();
@@ -2013,13 +2013,13 @@ contract Foo {
     let receive = fi
         .declarations
         .values()
-        .find(|d| d.name == "receive" && d.kind == DeclKind::FallbackReceive);
+        .find(|d| d.name == "receive" && d.kind() == DeclKind::FallbackReceive);
     assert!(receive.is_some(), "receive function should be declared");
 
     let fallback = fi
         .declarations
         .values()
-        .find(|d| d.name == "fallback" && d.kind == DeclKind::FallbackReceive);
+        .find(|d| d.name == "fallback" && d.kind() == DeclKind::FallbackReceive);
     assert!(fallback.is_some(), "fallback function should be declared");
 }
 
@@ -2047,7 +2047,7 @@ contract Child is Base {
     let constructors: Vec<_> = fi
         .declarations
         .values()
-        .filter(|d| d.kind == DeclKind::Constructor)
+        .filter(|d| d.kind() == DeclKind::Constructor)
         .collect();
     assert_eq!(
         constructors.len(),
@@ -2088,7 +2088,7 @@ contract Foo {
     let modifier = fi
         .declarations
         .values()
-        .find(|d| d.name == "onlyAuthorized" && d.kind == DeclKind::Modifier)
+        .find(|d| d.name == "onlyAuthorized" && d.kind() == DeclKind::Modifier)
         .expect("onlyAuthorized modifier should be declared");
     let params = modifier.parameters();
     assert_eq!(params.len(), 1);
@@ -2124,7 +2124,7 @@ contract Shop {
     let price_type = fi
         .declarations
         .values()
-        .find(|d| d.name == "Price" && d.kind == DeclKind::UserDefinedType);
+        .find(|d| d.name == "Price" && d.kind() == DeclKind::UserDefinedType);
     assert!(
         price_type.is_some(),
         "User-defined value type Price should be declared"
@@ -2133,7 +2133,7 @@ contract Shop {
     let quantity_type = fi
         .declarations
         .values()
-        .find(|d| d.name == "Quantity" && d.kind == DeclKind::UserDefinedType);
+        .find(|d| d.name == "Quantity" && d.kind() == DeclKind::UserDefinedType);
     assert!(
         quantity_type.is_some(),
         "User-defined value type Quantity should be declared"
@@ -2173,7 +2173,7 @@ contract Foo {
     let a_decl = fi
         .declarations
         .values()
-        .find(|d| d.name == "a" && d.kind == DeclKind::LocalVariable);
+        .find(|d| d.name == "a" && d.kind() == DeclKind::LocalVariable);
     assert!(
         a_decl.is_some(),
         "a from tuple assignment should be declared"
@@ -2182,7 +2182,7 @@ contract Foo {
     let c_decl = fi
         .declarations
         .values()
-        .find(|d| d.name == "c" && d.kind == DeclKind::LocalVariable);
+        .find(|d| d.name == "c" && d.kind() == DeclKind::LocalVariable);
     assert!(
         c_decl.is_some(),
         "c from tuple assignment should be declared"
@@ -2231,7 +2231,7 @@ contract Factory {
     let contracts: Vec<_> = fi
         .declarations
         .values()
-        .filter(|d| d.kind == DeclKind::Contract)
+        .filter(|d| d.kind() == DeclKind::Contract)
         .collect();
     assert_eq!(contracts.len(), 3, "Should have 3 contracts");
 
@@ -2274,7 +2274,7 @@ interface IVault {
     let iface = fi
         .declarations
         .values()
-        .find(|d| d.name == "IVault" && d.kind == DeclKind::Interface)
+        .find(|d| d.name == "IVault" && d.kind() == DeclKind::Interface)
         .expect("IVault interface should be declared");
     // Members should include events, errors, and functions
     let members = iface.members();
@@ -2320,14 +2320,14 @@ library PointLib {
     let lib = fi
         .declarations
         .values()
-        .find(|d| d.name == "PointLib" && d.kind == DeclKind::Library)
+        .find(|d| d.name == "PointLib" && d.kind() == DeclKind::Library)
         .expect("PointLib library should be declared");
     assert!(!lib.members().is_empty(), "Library should have members");
 
     let add_fn = fi
         .declarations
         .values()
-        .find(|d| d.name == "add" && d.kind == DeclKind::Function)
+        .find(|d| d.name == "add" && d.kind() == DeclKind::Function)
         .expect("add function should be declared");
     let params = add_fn.parameters();
     assert_eq!(params.len(), 2, "add should have 2 parameters");
@@ -2356,16 +2356,19 @@ contract Foo {
         .find(|d| d.name == "MAX_SUPPLY")
         .expect("MAX_SUPPLY should be declared");
     assert!(
-        max_supply.is_constant,
+        max_supply.is_constant(),
         "MAX_SUPPLY should be marked constant"
     );
 
     let owner_decl = fi
         .declarations
         .values()
-        .find(|d| d.name == "owner" && d.kind == DeclKind::StateVariable)
+        .find(|d| d.name == "owner" && d.kind() == DeclKind::StateVariable)
         .expect("owner should be declared");
-    assert!(owner_decl.is_immutable, "owner should be marked immutable");
+    assert!(
+        owner_decl.is_immutable(),
+        "owner should be marked immutable"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2384,7 +2387,7 @@ library EmptyLibrary {}
     let ec = fi
         .declarations
         .values()
-        .find(|d| d.name == "EmptyContract" && d.kind == DeclKind::Contract);
+        .find(|d| d.name == "EmptyContract" && d.kind() == DeclKind::Contract);
     assert!(ec.is_some(), "Empty contract should be declared");
     assert_eq!(
         ec.unwrap().members().len(),
@@ -2395,13 +2398,13 @@ library EmptyLibrary {}
     let ei = fi
         .declarations
         .values()
-        .find(|d| d.name == "EmptyInterface" && d.kind == DeclKind::Interface);
+        .find(|d| d.name == "EmptyInterface" && d.kind() == DeclKind::Interface);
     assert!(ei.is_some(), "Empty interface should be declared");
 
     let el = fi
         .declarations
         .values()
-        .find(|d| d.name == "EmptyLibrary" && d.kind == DeclKind::Library);
+        .find(|d| d.name == "EmptyLibrary" && d.kind() == DeclKind::Library);
     assert!(el.is_some(), "Empty library should be declared");
 }
 
@@ -2464,7 +2467,7 @@ contract Token is Ownable, Pausable {
     let token = fi
         .declarations
         .values()
-        .find(|d| d.name == "Token" && d.kind == DeclKind::Contract)
+        .find(|d| d.name == "Token" && d.kind() == DeclKind::Contract)
         .expect("Token should be declared");
     let bases = token.base_contracts();
     assert_eq!(bases.len(), 2, "Token should have 2 base contracts");
@@ -2507,7 +2510,7 @@ contract Concrete is AbstractBase {
     let abstract_base = fi
         .declarations
         .values()
-        .find(|d| d.name == "AbstractBase" && d.kind == DeclKind::Contract);
+        .find(|d| d.name == "AbstractBase" && d.kind() == DeclKind::Contract);
     assert!(
         abstract_base.is_some(),
         "Abstract contract should be declared"
@@ -2545,7 +2548,7 @@ contract Foo {
     let account = fi
         .declarations
         .values()
-        .find(|d| d.name == "Account" && d.kind == DeclKind::Struct)
+        .find(|d| d.name == "Account" && d.kind() == DeclKind::Struct)
         .expect("Account struct should be declared");
     let members = account.members();
     let member_names: Vec<&str> = members.iter().map(|m| m.name.as_str()).collect();
@@ -2617,7 +2620,7 @@ contract Foo {
     let event = fi
         .declarations
         .values()
-        .find(|d| d.name == "Transfer" && d.kind == DeclKind::Event)
+        .find(|d| d.name == "Transfer" && d.kind() == DeclKind::Event)
         .expect("Transfer event should be declared");
     let params = event.parameters();
     assert_eq!(params.len(), 3, "Transfer event should have 3 params");
@@ -2630,7 +2633,7 @@ contract Foo {
     let decl = st.resolve_at(&path, pos);
     assert!(decl.is_some(), "Transfer in emit should resolve");
     assert_eq!(decl.unwrap().name, "Transfer");
-    assert_eq!(decl.unwrap().kind, DeclKind::Event);
+    assert_eq!(decl.unwrap().kind(), DeclKind::Event);
 }
 
 // ---------------------------------------------------------------------------
@@ -2652,7 +2655,7 @@ contract Foo {
     let error = fi
         .declarations
         .values()
-        .find(|d| d.name == "TransferFailed" && d.kind == DeclKind::Error)
+        .find(|d| d.name == "TransferFailed" && d.kind() == DeclKind::Error)
         .expect("TransferFailed error should be declared");
     let params = error.parameters();
     assert_eq!(params.len(), 3, "Error should have 3 parameters");
@@ -2664,7 +2667,7 @@ contract Foo {
     let pos = source.find("revert TransferFailed(").unwrap() + "revert ".len();
     let decl = st.resolve_at(&path, pos);
     assert!(decl.is_some(), "TransferFailed in revert should resolve");
-    assert_eq!(decl.unwrap().kind, DeclKind::Error);
+    assert_eq!(decl.unwrap().kind(), DeclKind::Error);
 }
 
 // ---------------------------------------------------------------------------

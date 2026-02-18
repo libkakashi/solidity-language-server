@@ -176,13 +176,13 @@ fn get_dot_completions(
         // Direct members (struct fields, contract functions, etc.)
         // For contracts/interfaces/libraries, also include inherited members.
         if matches!(
-            decl.kind,
+            decl.kind(),
             DeclKind::Contract | DeclKind::Interface | DeclKind::Library
         ) {
             let all = st.all_members_of(&decl.name, file);
             if !all.is_empty() {
                 let mut items: Vec<CompletionItem> = all.iter().map(member_to_completion).collect();
-                if let Some(ref tt) = decl.type_text {
+                if let Some(tt) = decl.type_text() {
                     append_using_for(st, file, tt, &mut items);
                 }
                 return items;
@@ -192,7 +192,7 @@ fn get_dot_completions(
         if !members.is_empty() {
             let mut items: Vec<CompletionItem> = members.iter().map(member_to_completion).collect();
             // Also include using-for methods if the decl has a type.
-            if let Some(ref tt) = decl.type_text {
+            if let Some(tt) = decl.type_text() {
                 append_using_for(st, file, tt, &mut items);
             }
             return items;
@@ -200,7 +200,7 @@ fn get_dot_completions(
 
         // Enum values as fallback (enum_values might be populated even if
         // members isn't, depending on the indexing path).
-        if decl.kind == DeclKind::Enum {
+        if decl.kind() == DeclKind::Enum {
             let vals = decl.enum_values();
             if !vals.is_empty() {
                 return vals
@@ -216,7 +216,7 @@ fn get_dot_completions(
         }
 
         // Type-based member lookup.
-        if let Some(ref type_text) = decl.type_text {
+        if let Some(type_text) = decl.type_text() {
             // Built-in type members (arrays, address).
             if let Some(mut items) = builtin_type_members(type_text) {
                 append_using_for(st, file, type_text, &mut items);
@@ -314,9 +314,8 @@ fn this_completions(
 }
 
 fn is_public_function(d: &crate::symbol_table::Declaration) -> bool {
-    d.kind == DeclKind::Function
-        && d.visibility
-            .as_deref()
+    d.kind() == DeclKind::Function
+        && d.visibility()
             .map_or(false, |v| v == "external" || v == "public")
 }
 
@@ -324,7 +323,7 @@ fn decl_to_function_completion(d: &crate::symbol_table::Declaration) -> Completi
     CompletionItem {
         label: d.name.clone(),
         kind: Some(CompletionItemKind::FUNCTION),
-        detail: d.type_text.clone(),
+        detail: d.type_text().map(|s| s.to_string()),
         ..Default::default()
     }
 }
@@ -599,7 +598,7 @@ fn type_members_for(type_name: &str, st: &SymbolTable, file: &Path) -> Vec<Compl
     // Look up the type declaration to determine its kind.
     if let Some(decl_id) = st.find_type_decl(file, type_name) {
         if let Some(decl) = st.get_declaration(&decl_id) {
-            return match decl.kind {
+            return match decl.kind() {
                 DeclKind::Enum => make_type_items(&[("min", type_name), ("max", type_name)]),
                 DeclKind::Interface => {
                     make_type_items(&[("name", "string"), ("interfaceId", "bytes4")])
@@ -712,8 +711,8 @@ fn get_import_completions(
                 if let Some(decl) = target_fi.declarations.get(decl_id) {
                     items.push(CompletionItem {
                         label: name.clone(),
-                        kind: Some(decl_kind_to_completion_kind(decl.kind)),
-                        detail: decl.type_text.clone(),
+                        kind: Some(decl_kind_to_completion_kind(decl.kind())),
+                        detail: decl.type_text().map(|s| s.to_string()),
                         ..Default::default()
                     });
                 }
@@ -789,8 +788,8 @@ fn get_general_completions(
         .filter(|decl| decl.id.byte_offset < SYNTHETIC_BASE)
         .map(|decl| CompletionItem {
             label: decl.name.clone(),
-            kind: Some(decl_kind_to_completion_kind(decl.kind)),
-            detail: decl.type_text.clone(),
+            kind: Some(decl_kind_to_completion_kind(decl.kind())),
+            detail: decl.type_text().map(|s| s.to_string()),
             ..Default::default()
         })
         .collect();
@@ -906,7 +905,7 @@ fn call_result_completions(
     // Check if it's a function — use its return type for completions.
     let visible = st.visible_declarations(file, scope);
     for decl in &visible {
-        if decl.name == name && decl.kind == DeclKind::Function {
+        if decl.name == name && decl.kind() == DeclKind::Function {
             let ret_params = decl.return_parameters();
             if ret_params.len() == 1 {
                 let ret_type = &ret_params[0].0;

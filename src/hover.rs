@@ -38,15 +38,15 @@ pub fn hover_info(
 }
 
 fn build_signature(decl: &crate::symbol_table::Declaration) -> String {
-    match decl.kind {
+    match decl.kind() {
         DeclKind::Function => {
             let params = format_params(decl.parameters());
             let returns = format_params(decl.return_parameters());
             let mut sig = format!("function {}({params})", decl.name);
-            if let Some(ref vis) = decl.visibility {
+            if let Some(vis) = decl.visibility() {
                 sig.push_str(&format!(" {vis}"));
             }
-            if let Some(ref sm) = decl.state_mutability {
+            if let Some(sm) = decl.state_mutability() {
                 if sm != "nonpayable" {
                     sig.push_str(&format!(" {sm}"));
                 }
@@ -81,7 +81,7 @@ fn build_signature(decl: &crate::symbol_table::Declaration) -> String {
             format!("error {}({params})", decl.name)
         }
         DeclKind::Contract | DeclKind::Interface | DeclKind::Library => {
-            let keyword = match decl.kind {
+            let keyword = match decl.kind() {
                 DeclKind::Interface => "interface",
                 DeclKind::Library => "library",
                 _ => "contract",
@@ -113,15 +113,15 @@ fn build_signature(decl: &crate::symbol_table::Declaration) -> String {
         | DeclKind::LocalVariable
         | DeclKind::Parameter
         | DeclKind::Constant => {
-            let type_str = decl.type_text.as_deref().unwrap_or("unknown");
+            let type_str = decl.type_text().unwrap_or("unknown");
             let mut sig = type_str.to_string();
-            if let Some(ref vis) = decl.visibility {
+            if let Some(vis) = decl.visibility() {
                 sig.push_str(&format!(" {vis}"));
             }
-            if decl.is_constant {
+            if decl.is_constant() {
                 sig.push_str(" constant");
             }
-            if decl.is_immutable {
+            if decl.is_immutable() {
                 sig.push_str(" immutable");
             }
             sig.push_str(&format!(" {}", decl.name));
@@ -129,7 +129,20 @@ fn build_signature(decl: &crate::symbol_table::Declaration) -> String {
         }
         DeclKind::EnumValue => decl.name.clone(),
         DeclKind::UserDefinedType => format!("type {}", decl.name),
-        DeclKind::ImportAlias => format!("import alias {}", decl.name),
+        DeclKind::ImportAlias => {
+            if let Some(target) = decl.import_target() {
+                match target.kind {
+                    Some(DeclKind::Contract) => format!("contract {}", decl.name),
+                    Some(DeclKind::Interface) => format!("interface {}", decl.name),
+                    Some(DeclKind::Library) => format!("library {}", decl.name),
+                    Some(DeclKind::Struct) => format!("struct {}", decl.name),
+                    Some(DeclKind::Enum) => format!("enum {}", decl.name),
+                    _ => format!("import {}", decl.name),
+                }
+            } else {
+                format!("import {}", decl.name)
+            }
+        }
     }
 }
 

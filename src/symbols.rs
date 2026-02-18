@@ -25,7 +25,7 @@ pub fn document_symbols(
         if decl.scope != 0 || decl.id.byte_offset >= SYNTHETIC_BASE {
             continue;
         }
-        match decl.kind {
+        match decl.kind() {
             DeclKind::Contract | DeclKind::Interface | DeclKind::Library => {
                 let children = collect_children(fi, source, decl, line_index);
                 top_level.push(make_document_symbol(decl, source, children, line_index));
@@ -78,7 +78,7 @@ pub fn workspace_symbols(st: &SymbolTable, query: &str) -> Vec<SymbolInformation
             if !query_lower.is_empty() && !decl.name.to_lowercase().contains(&query_lower) {
                 continue;
             }
-            if matches!(decl.kind, DeclKind::Parameter | DeclKind::LocalVariable)
+            if matches!(decl.kind(), DeclKind::Parameter | DeclKind::LocalVariable)
                 || decl.id.byte_offset >= SYNTHETIC_BASE
             {
                 continue;
@@ -88,7 +88,7 @@ pub fn workspace_symbols(st: &SymbolTable, query: &str) -> Vec<SymbolInformation
 
             results.push(SymbolInformation {
                 name: decl.name.clone(),
-                kind: decl_kind_to_symbol_kind(decl.kind),
+                kind: decl_kind_to_symbol_kind(decl.kind()),
                 tags: None,
                 deprecated: None,
                 location: Location {
@@ -138,7 +138,7 @@ fn collect_children(
         .values()
         .filter(|d| d.scope == scope_id && d.id != parent.id)
         .map(|d| {
-            let grandchildren = if matches!(d.kind, DeclKind::Struct | DeclKind::Enum) {
+            let grandchildren = if matches!(d.kind(), DeclKind::Struct | DeclKind::Enum) {
                 d.members()
                     .iter()
                     .map(|m| {
@@ -182,8 +182,8 @@ fn make_document_symbol(
 ) -> DocumentSymbol {
     DocumentSymbol {
         name: decl.name.clone(),
-        detail: decl.type_text.clone(),
-        kind: decl_kind_to_symbol_kind(decl.kind),
+        detail: decl.type_text().map(|s| s.to_string()),
+        kind: decl_kind_to_symbol_kind(decl.kind()),
         range: line_index.byte_range_to_lsp_range(source, decl.full_range.0, decl.full_range.1),
         selection_range: line_index.byte_range_to_lsp_range(
             source,
@@ -227,7 +227,7 @@ fn find_container_name(fi: &FileIndex, decl: &Declaration) -> Option<String> {
     ) {
         for d in fi.declarations.values() {
             if matches!(
-                d.kind,
+                d.kind(),
                 DeclKind::Contract | DeclKind::Interface | DeclKind::Library
             ) && d.full_range.0 <= scope.range.0
                 && d.full_range.1 >= scope.range.1
@@ -245,7 +245,7 @@ fn find_container_name(fi: &FileIndex, decl: &Declaration) -> Option<String> {
             ) {
                 for d in fi.declarations.values() {
                     if matches!(
-                        d.kind,
+                        d.kind(),
                         DeclKind::Contract | DeclKind::Interface | DeclKind::Library
                     ) && d.full_range.0 <= parent_scope.range.0
                         && d.full_range.1 >= parent_scope.range.1
