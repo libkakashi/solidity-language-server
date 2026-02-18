@@ -152,8 +152,8 @@ async fn solar_worker(
 pub struct SolLsp {
     client: Client,
     symbol_table: Arc<RwLock<SymbolTable>>,
-    /// In-memory text buffers using Arc<str> for zero-copy sharing. (Fix #14)
-    text_cache: Arc<RwLock<FxHashMap<Url, Arc<str>>>>,
+    /// In-memory text buffers with pre-built line indices. (Fix #14)
+    text_cache: Arc<RwLock<FxHashMap<Url, (Arc<str>, Arc<LineIndex>)>>>,
     ts_parser: Arc<tokio::sync::Mutex<TsParser>>,
     lint_engine: Arc<LintEngine>,
     ts_tx: tokio::sync::mpsc::UnboundedSender<TsWorkerMsg>,
@@ -195,19 +195,17 @@ impl SolLsp {
         }
     }
 
-    async fn get_source_and_path(&self, uri: &Url) -> Option<(PathBuf, Arc<str>, LineIndex)> {
+    async fn get_source_and_path(&self, uri: &Url) -> Option<(PathBuf, Arc<str>, Arc<LineIndex>)> {
         let file_path = uri.to_file_path().ok()?;
-        let source: Arc<str> = {
-            let text_cache = self.text_cache.read().await;
-            if let Some(cached) = text_cache.get(uri) {
-                Arc::clone(cached)
-            } else {
-                drop(text_cache);
-                std::fs::read_to_string(&file_path).ok()?.into()
-            }
-        };
-        let line_index = LineIndex::new(&source);
-        Some((file_path, source, line_index))
+        let text_cache = self.text_cache.read().await;
+        if let Some((source, line_index)) = text_cache.get(uri) {
+            Some((file_path, Arc::clone(source), Arc::clone(line_index)))
+        } else {
+            drop(text_cache);
+            let source: Arc<str> = std::fs::read_to_string(&file_path).ok()?.into();
+            let line_index = Arc::new(LineIndex::new(&source));
+            Some((file_path, source, line_index))
+        }
     }
 
     /// Send a file to both workers for processing. (Fix #24: text is Arc<str>)
@@ -348,10 +346,11 @@ impl LanguageServer for SolLsp {
         let version = params.text_document.version;
 
         if let Ok(file_path) = uri.to_file_path() {
+            let line_index = Arc::new(LineIndex::new(&text));
             self.text_cache
                 .write()
                 .await
-                .insert(uri.clone(), Arc::clone(&text));
+                .insert(uri.clone(), (Arc::clone(&text), line_index));
             self.notify_workers(&uri, &file_path, &text, version);
         }
     }
@@ -362,10 +361,11 @@ impl LanguageServer for SolLsp {
 
         if let Some(change) = params.content_changes.into_iter().next() {
             let text: Arc<str> = change.text.into();
+            let line_index = Arc::new(LineIndex::new(&text));
             self.text_cache
                 .write()
                 .await
-                .insert(uri.clone(), Arc::clone(&text));
+                .insert(uri.clone(), (Arc::clone(&text), line_index));
             if let Ok(file_path) = uri.to_file_path() {
                 self.notify_workers(&uri, &file_path, &text, version);
             }
@@ -389,10 +389,11 @@ impl LanguageServer for SolLsp {
         };
 
         if let Ok(file_path) = uri.to_file_path() {
+            let line_index = Arc::new(LineIndex::new(&text));
             self.text_cache
                 .write()
                 .await
-                .insert(uri.clone(), Arc::clone(&text));
+                .insert(uri.clone(), (Arc::clone(&text), line_index));
             self.notify_workers(&uri, &file_path, &text, 0);
         }
     }
@@ -648,7 +649,7 @@ impl LanguageServer for SolLsp {
         let source: Arc<str> = {
             let text_cache = self.text_cache.read().await;
             match text_cache.get(uri) {
-                Some(cached) => Arc::clone(cached),
+                Some((cached, _)) => Arc::clone(cached),
                 None => match uri.to_file_path() {
                     Ok(path) => match std::fs::read_to_string(&path) {
                         Ok(c) => c.into(),
