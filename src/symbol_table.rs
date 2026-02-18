@@ -2804,9 +2804,22 @@ fn resolve_member(
         // where the type cast resolves to the interface but the method comes from a
         // `using SafeERC20 for IERC20` directive.
         DeclKind::Contract | DeclKind::Interface | DeclKind::Library => {
-            find_member_in_scope(st, &container_decl_id, member_name).or_else(|| {
-                resolve_using_for_member(st, file_id, &container_decl.name, member_name)
-            })
+            find_member_in_scope(st, &container_decl_id, member_name)
+                .or_else(|| {
+                    // Search inherited members from base contracts.
+                    let base_names: Vec<String> = container_decl.base_contracts().to_vec();
+                    for base_name in &base_names {
+                        if let Some(found) =
+                            resolve_in_base_contract(st, container_file, base_name, member_name)
+                        {
+                            return Some(found);
+                        }
+                    }
+                    None
+                })
+                .or_else(|| {
+                    resolve_using_for_member(st, file_id, &container_decl.name, member_name)
+                })
         }
         DeclKind::Struct | DeclKind::Enum => {
             find_member_by_decl_id(st, &container_decl_id, member_name).or_else(|| {
@@ -2839,7 +2852,20 @@ fn resolve_member(
                 let type_decl = st.get_declaration(&type_decl_id)?;
                 let direct = match type_decl.kind {
                     DeclKind::Contract | DeclKind::Interface | DeclKind::Library => {
-                        find_member_in_scope(st, &type_decl_id, member_name)
+                        find_member_in_scope(st, &type_decl_id, member_name).or_else(|| {
+                            let base_names: Vec<String> = type_decl.base_contracts().to_vec();
+                            for base_name in &base_names {
+                                if let Some(found) = resolve_in_base_contract(
+                                    st,
+                                    type_decl_id.file,
+                                    base_name,
+                                    member_name,
+                                ) {
+                                    return Some(found);
+                                }
+                            }
+                            None
+                        })
                     }
                     DeclKind::Struct | DeclKind::Enum => {
                         find_member_by_decl_id(st, &type_decl_id, member_name)
@@ -2865,7 +2891,21 @@ fn resolve_member(
                     let type_decl = st.get_declaration(&type_decl_id)?;
                     let direct = match type_decl.kind {
                         DeclKind::Contract | DeclKind::Interface | DeclKind::Library => {
-                            find_member_in_scope(st, &type_decl_id, member_name)
+                            find_member_in_scope(st, &type_decl_id, member_name).or_else(|| {
+                                let base_names: Vec<String> =
+                                    type_decl.base_contracts().to_vec();
+                                for bn in &base_names {
+                                    if let Some(found) = resolve_in_base_contract(
+                                        st,
+                                        type_decl_id.file,
+                                        bn,
+                                        member_name,
+                                    ) {
+                                        return Some(found);
+                                    }
+                                }
+                                None
+                            })
                         }
                         DeclKind::Struct | DeclKind::Enum => {
                             find_member_by_decl_id(st, &type_decl_id, member_name)

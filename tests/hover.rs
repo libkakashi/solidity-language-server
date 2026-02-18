@@ -1722,3 +1722,117 @@ contract Foo {
         "Should show function name, got: {text}"
     );
 }
+
+#[test]
+fn hover_on_inherited_member_via_variable() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Base {
+    function foo() public pure returns (uint256) {
+        return 42;
+    }
+}
+
+contract Child is Base {
+    function bar() public pure {
+        Child c = Child(address(0));
+        c.foo();
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    // Hover on `foo` in `c.foo()`
+    let pos = source.find("c.foo()").unwrap() + "c.".len();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col));
+    assert!(
+        text.is_some(),
+        "Should show hover for inherited member via variable"
+    );
+    let text = text.unwrap();
+    assert!(
+        text.contains("function foo"),
+        "Should show function signature, got: {text}"
+    );
+}
+
+#[test]
+fn hover_on_inherited_member_via_contract_name() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Base {
+    function foo() public pure returns (uint256) {
+        return 42;
+    }
+}
+
+contract Child is Base {}
+
+contract User {
+    function test() public pure {
+        Child.foo();
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    // Hover on `foo` in `Child.foo()`
+    let pos = source.find("Child.foo()").unwrap() + "Child.".len();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col));
+    assert!(
+        text.is_some(),
+        "Should show hover for inherited member via contract name"
+    );
+    let text = text.unwrap();
+    assert!(
+        text.contains("function foo"),
+        "Should show function signature, got: {text}"
+    );
+}
+
+#[test]
+fn hover_on_grandparent_inherited_member() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract GrandParent {
+    function ancient() public pure returns (uint256) {
+        return 1;
+    }
+}
+
+contract Parent is GrandParent {}
+
+contract Child is Parent {
+    function test() public pure {
+        Child c = Child(address(0));
+        c.ancient();
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    // Hover on `ancient` in `c.ancient()`
+    let pos = source.find("c.ancient()").unwrap() + "c.".len();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col));
+    assert!(
+        text.is_some(),
+        "Should show hover for grandparent inherited member"
+    );
+    let text = text.unwrap();
+    assert!(
+        text.contains("function ancient"),
+        "Should show function signature, got: {text}"
+    );
+}
