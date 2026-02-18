@@ -24,7 +24,15 @@ fn completion_labels(
     pos: Position,
     trigger: Option<&str>,
 ) -> Vec<String> {
-    match handle_completion(st, path, source, pos, trigger, &LineIndex::new(source)) {
+    match handle_completion(
+        st,
+        path,
+        source,
+        pos,
+        trigger,
+        &LineIndex::new(source),
+        None,
+    ) {
         Some(CompletionResponse::List(list)) => {
             list.items.iter().map(|i| i.label.clone()).collect()
         }
@@ -1550,13 +1558,7 @@ import { } from "./Lib.sol";
     let line = main_source[..cursor_pos].matches('\n').count() as u32;
     let col = (cursor_pos - main_source[..cursor_pos].rfind('\n').unwrap() - 1) as u32;
 
-    let labels = completion_labels(
-        &st,
-        &main_path,
-        main_source,
-        Position::new(line, col),
-        None,
-    );
+    let labels = completion_labels(&st, &main_path, main_source, Position::new(line, col), None);
 
     assert!(
         labels.contains(&"MyContract".to_string()),

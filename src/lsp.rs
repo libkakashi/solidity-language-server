@@ -50,6 +50,7 @@ async fn ts_worker(
     lint_engine: Arc<LintEngine>,
     symbol_table: Arc<RwLock<SymbolTable>>,
     ts_diag_cache: Arc<RwLock<FxHashMap<Url, Vec<Diagnostic>>>>,
+    tree_cache: Arc<RwLock<FxHashMap<Url, tree_sitter::Tree>>>,
 ) {
     while let Some(mut msg) = rx.recv().await {
         // Drain queued messages — only process the latest.
@@ -65,6 +66,12 @@ async fn ts_worker(
                 None => continue,
             }
         };
+
+        // Cache parsed tree for use by completion (avoids re-parsing).
+        tree_cache
+            .write()
+            .await
+            .insert(msg.uri.clone(), tree.clone());
 
         // Lint from the parsed tree.
         let mut diags = parser::collect_parse_errors(&tree, &msg.text);
@@ -154,6 +161,8 @@ pub struct SolLsp {
     symbol_table: Arc<RwLock<SymbolTable>>,
     /// In-memory text buffers with pre-built line indices. (Fix #14)
     text_cache: Arc<RwLock<FxHashMap<Url, (Arc<str>, Arc<LineIndex>)>>>,
+    /// Cached parse trees from ts_worker (avoids re-parsing for completion).
+    tree_cache: Arc<RwLock<FxHashMap<Url, tree_sitter::Tree>>>,
     ts_parser: Arc<tokio::sync::Mutex<TsParser>>,
     lint_engine: Arc<LintEngine>,
     ts_tx: tokio::sync::mpsc::UnboundedSender<TsWorkerMsg>,
@@ -172,6 +181,7 @@ impl SolLsp {
         let resolver = ImportResolver::new(std::path::Path::new("."));
         let symbol_table = Arc::new(RwLock::new(SymbolTable::new(resolver)));
         let text_cache = Arc::new(RwLock::new(FxHashMap::default()));
+        let tree_cache = Arc::new(RwLock::new(FxHashMap::default()));
         let ts_parser = Arc::new(tokio::sync::Mutex::new(TsParser::new()));
         let lint_engine = Arc::new(LintEngine::new());
         let ts_diag_cache = Arc::new(RwLock::new(FxHashMap::default()));
@@ -183,6 +193,7 @@ impl SolLsp {
             client,
             symbol_table,
             text_cache,
+            tree_cache,
             ts_parser,
             lint_engine,
             ts_tx,
@@ -319,6 +330,7 @@ impl LanguageServer for SolLsp {
                 self.lint_engine.clone(),
                 self.symbol_table.clone(),
                 self.ts_diag_cache.clone(),
+                self.tree_cache.clone(),
             ));
         }
         if let Some(solar_rx) = self.solar_rx.lock().await.take() {
@@ -404,6 +416,7 @@ impl LanguageServer for SolLsp {
         let uri = &params.text_document.uri;
         self.ts_diag_cache.write().await.remove(uri);
         self.text_cache.write().await.remove(uri);
+        self.tree_cache.write().await.remove(uri);
         // Fix #7: also remove from symbol table.
         if let Ok(file_path) = params.text_document.uri.to_file_path() {
             self.symbol_table.write().await.remove_file(&file_path);
@@ -576,6 +589,8 @@ impl LanguageServer for SolLsp {
             None => return Ok(None),
         };
 
+        let cached_tree = self.tree_cache.read().await.get(uri).cloned();
+
         let st = self.symbol_table.read().await;
         Ok(completion::handle_completion(
             &st,
@@ -584,6 +599,7 @@ impl LanguageServer for SolLsp {
             position,
             trigger_char,
             &line_index,
+            cached_tree.as_ref(),
         ))
     }
 

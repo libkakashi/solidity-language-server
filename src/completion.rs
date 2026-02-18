@@ -20,6 +20,7 @@ pub fn handle_completion(
     position: Position,
     trigger_char: Option<&str>,
     line_index: &LineIndex,
+    cached_tree: Option<&tree_sitter::Tree>,
 ) -> Option<CompletionResponse> {
     // Handle empty/whitespace-only files gracefully.
     if source.is_empty() {
@@ -38,15 +39,19 @@ pub fn handle_completion(
             .map(|i| line_start_byte + i)
             .unwrap_or(source.len())];
 
-    // Parse once for comment/string detection (avoids redundant re-parse).
-    let mut parser = TsParser::new();
-    let tree = parser.parse(source, None);
+    // Use cached tree if available, otherwise parse for comment/string detection.
+    let mut fallback_parser;
+    let fallback_tree;
+    let tree: Option<&tree_sitter::Tree> = if let Some(t) = cached_tree {
+        Some(t)
+    } else {
+        fallback_parser = TsParser::new();
+        fallback_tree = fallback_parser.parse(source, None);
+        fallback_tree.as_ref()
+    };
 
     // Suppress completion inside comments and string literals.
-    if tree
-        .as_ref()
-        .is_some_and(|t| is_in_comment_or_string(t, abs_byte))
-    {
+    if tree.is_some_and(|t| is_in_comment_or_string(t, abs_byte)) {
         return Some(CompletionResponse::List(CompletionList {
             is_incomplete: false,
             items: vec![],
