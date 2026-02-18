@@ -271,7 +271,7 @@ fn this_completions(
     // Try scope-based approach first (uses fi.declarations which have visibility).
     if let Some(contract) = find_enclosing_contract(st, file, scope) {
         let mut items: Vec<CompletionItem> = Vec::new();
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = FxHashSet::default();
 
         // Collect own external/public functions from the contract's scope.
         for s in &fi.scopes {
@@ -341,8 +341,7 @@ fn this_completions(
 
     // Also add inherited members in the fallback path.
     if let Some(base_names) = extract_base_contracts_from_text(&source[..cursor_byte]) {
-        let mut seen: std::collections::HashSet<String> =
-            items.iter().map(|i| i.label.clone()).collect();
+        let mut seen: FxHashSet<String> = items.iter().map(|i| i.label.clone()).collect();
         let mut base_decls = Vec::new();
         let mut base_seen = FxHashSet::default();
         for base_name in &base_names {
@@ -383,7 +382,7 @@ fn super_completions(
 ) -> Vec<CompletionItem> {
     if let Some(contract) = find_enclosing_contract(st, file, scope) {
         let mut items = Vec::new();
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = FxHashSet::default();
         for base_name in contract.base_contracts() {
             for m in &st.all_members_of(base_name, file) {
                 if seen.insert(m.name.clone()) {
@@ -482,7 +481,7 @@ fn super_completions_fallback(
         None => return vec![],
     };
     let mut items = Vec::new();
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = FxHashSet::default();
     for base_name in &base_names {
         for m in &st.all_members_of(base_name, file) {
             if seen.insert(m.name.clone()) {
