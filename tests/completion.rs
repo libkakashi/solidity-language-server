@@ -1573,3 +1573,72 @@ import { } from "./Lib.sol";
         "import completion should suggest 'MathLib', got: {labels:?}"
     );
 }
+
+#[test]
+fn dot_completion_on_qualified_imported_struct_variable() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut parser = TsParser::new();
+    let resolver = ImportResolver::with_root(tmp.path().to_path_buf());
+
+    let types_source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Types {
+    struct UserInfo {
+        address account;
+        uint256 balance;
+        bool active;
+    }
+}
+"#;
+    let types_path = tmp.path().join("Types.sol");
+    std::fs::write(&types_path, types_source).unwrap();
+
+    let main_source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+import {Types} from "./Types.sol";
+
+contract Main {
+    function test() public {
+        Types.UserInfo memory user = Types.UserInfo(msg.sender, 100, true);
+        user.
+    }
+}
+"#;
+    let main_path = tmp.path().join("Main.sol");
+    std::fs::write(&main_path, main_source).unwrap();
+
+    let mut st = SymbolTable::new(resolver);
+    st.index_file(&types_path, types_source, &mut parser);
+    st.resolve_file_references(&types_path, &mut parser);
+    st.index_file(&main_path, main_source, &mut parser);
+    st.resolve_file_references(&main_path, &mut parser);
+
+    let dot_pos = main_source.find("user.\n").unwrap() + "user.".len();
+    let line = main_source[..dot_pos].matches('\n').count() as u32;
+    let col = (dot_pos - main_source[..dot_pos].rfind('\n').unwrap() - 1) as u32;
+
+    let labels = completion_labels(
+        &st,
+        &main_path,
+        main_source,
+        Position::new(line, col),
+        Some("."),
+    );
+
+    eprintln!("labels: {labels:?}");
+
+    assert!(
+        labels.contains(&"account".to_string()),
+        "user. should include 'account' from Types.UserInfo, got: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"balance".to_string()),
+        "user. should include 'balance' from Types.UserInfo, got: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"active".to_string()),
+        "user. should include 'active' from Types.UserInfo, got: {labels:?}"
+    );
+}

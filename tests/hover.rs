@@ -1553,10 +1553,7 @@ contract Vault {
     let (st, path) = setup(source);
 
     // Hover on "safeTransferFrom" in "IERC20(token).safeTransferFrom(...)"
-    let pos = source
-        .find("IERC20(token).safeTransferFrom(msg")
-        .unwrap()
-        + "IERC20(token).".len();
+    let pos = source.find("IERC20(token).safeTransferFrom(msg").unwrap() + "IERC20(token).".len();
     let line = source[..pos].matches('\n').count() as u32;
     let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
 
@@ -1704,10 +1701,7 @@ contract Foo {
     st.resolve_file_references(&main_path, &mut parser);
 
     // Hover on "increment" in "counter.increment()"
-    let pos = main_source
-        .find("counter.increment()")
-        .unwrap()
-        + "counter.".len();
+    let pos = main_source.find("counter.increment()").unwrap() + "counter.".len();
     let line = main_source[..pos].matches('\n').count() as u32;
     let col = (pos - main_source[..pos].rfind('\n').unwrap() - 1) as u32;
 
@@ -1834,5 +1828,67 @@ contract Child is Parent {
     assert!(
         text.contains("function ancient"),
         "Should show function signature, got: {text}"
+    );
+}
+
+#[test]
+fn hover_on_qualified_imported_struct_field() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut parser = TsParser::new();
+    let resolver = ImportResolver::with_root(tmp.path().to_path_buf());
+
+    let types_source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Types {
+    struct UserInfo {
+        address account;
+        uint256 balance;
+        bool active;
+    }
+}
+"#;
+    let types_path = tmp.path().join("Types.sol");
+    std::fs::write(&types_path, types_source).unwrap();
+
+    let main_source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+import {Types} from "./Types.sol";
+
+contract Main {
+    function test() public {
+        Types.UserInfo memory user = Types.UserInfo(msg.sender, 100, true);
+        address a = user.account;
+    }
+}
+"#;
+    let main_path = tmp.path().join("Main.sol");
+    std::fs::write(&main_path, main_source).unwrap();
+
+    let mut st = SymbolTable::new(resolver);
+    st.index_file(&types_path, types_source, &mut parser);
+    st.resolve_file_references(&types_path, &mut parser);
+    st.index_file(&main_path, main_source, &mut parser);
+    st.resolve_file_references(&main_path, &mut parser);
+
+    // Hover on `account` in `user.account`
+    let pos = main_source.find("user.account").unwrap() + "user.".len();
+    let line = main_source[..pos].matches('\n').count() as u32;
+    let col = (pos - main_source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(main_source, &st, &main_path, Position::new(line, col));
+    assert!(
+        text.is_some(),
+        "Should show hover for field of qualified imported struct"
+    );
+    let text = text.unwrap();
+    assert!(
+        text.contains("address"),
+        "Should show field type, got: {text}"
+    );
+    assert!(
+        text.contains("account"),
+        "Should show field name, got: {text}"
     );
 }

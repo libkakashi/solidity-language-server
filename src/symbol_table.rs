@@ -775,7 +775,9 @@ impl SymbolTable {
         seen_names: &mut FxHashSet<String>,
         visited: &mut FxHashSet<DeclId>,
     ) {
-        let decl_id = match find_type_declaration(self, file_id, type_name) {
+        let base = strip_type_modifiers(type_name);
+        let lookup = base.strip_suffix(" payable").unwrap_or(base);
+        let decl_id = match find_type_declaration(self, file_id, lookup) {
             Some(id) => id,
             None => return,
         };
@@ -3163,7 +3165,93 @@ fn find_member_by_decl_id(
 }
 
 /// Find a type declaration by name, searching the given file and its imports.
+/// Handles qualified names like `ContractName.StructName` by resolving the
+/// container first, then searching its members/scope for the inner type.
 fn find_type_declaration(st: &SymbolTable, origin_file: FileId, type_name: &str) -> Option<DeclId> {
+    // Handle qualified names (e.g. `ImportedContract.StructName`).
+    if let Some(dot_pos) = type_name.find('.') {
+        let container_name = &type_name[..dot_pos];
+        let member_name = &type_name[dot_pos + 1..];
+        // Resolve the container (contract/library/interface/import alias).
+        let container_id = find_type_declaration_simple(st, origin_file, container_name)?;
+        let container_decl = st.get_declaration(&container_id)?;
+        return match container_decl.kind {
+            DeclKind::Contract | DeclKind::Interface | DeclKind::Library => {
+                find_member_in_scope(st, &container_id, member_name)
+                    .or_else(|| find_member_by_decl_id(st, &container_id, member_name))
+            }
+            DeclKind::ImportAlias => {
+                // For import aliases, search the target file's top-level declarations.
+                resolve_import_alias_type(st, origin_file, &container_id, member_name)
+            }
+            _ => None,
+        };
+    }
+    find_type_declaration_simple(st, origin_file, type_name)
+}
+
+/// Resolve a type name inside an import alias target file.
+fn resolve_import_alias_type(
+    st: &SymbolTable,
+    file_id: FileId,
+    alias_decl_id: &DeclId,
+    member_name: &str,
+) -> Option<DeclId> {
+    let fi = st.files.get(&file_id)?;
+    let alias_decl = fi.declarations.get(alias_decl_id)?;
+    let alias_name = &alias_decl.name;
+
+    for imp in &fi.imports {
+        let original_name = match &imp.kind {
+            ImportKind::Alias(alias) if alias == alias_name => None, // whole-file alias
+            ImportKind::Named(names) => names
+                .iter()
+                .find(|(name, al)| {
+                    let local = al.as_ref().unwrap_or(name);
+                    local == alias_name
+                })
+                .map(|(name, _)| name.as_str()),
+            _ => continue,
+        };
+
+        let resolved_path = imp.resolved_path.as_ref()?;
+        let target_fid = st.interner.lookup(resolved_path)?;
+        let target_fi = st.files.get(&target_fid)?;
+
+        if original_name.is_none() {
+            // Whole-file alias (`import "X" as Alias`): search top-level.
+            if let Some(decl) = find_top_level_by_name(target_fi, member_name) {
+                if is_member_bearing_kind(decl.kind) {
+                    return Some(decl.id);
+                }
+            }
+        } else {
+            // Named import: the alias refers to a specific type — search its scope.
+            let orig = original_name.unwrap();
+            if let Some(container_decl) = find_top_level_by_name(target_fi, orig) {
+                let cid = container_decl.id;
+                let result = match container_decl.kind {
+                    DeclKind::Contract | DeclKind::Interface | DeclKind::Library => {
+                        find_member_in_scope(st, &cid, member_name)
+                            .or_else(|| find_member_by_decl_id(st, &cid, member_name))
+                    }
+                    _ => find_member_by_decl_id(st, &cid, member_name),
+                };
+                if result.is_some() {
+                    return result;
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Simple (non-qualified) type declaration lookup.
+fn find_type_declaration_simple(
+    st: &SymbolTable,
+    origin_file: FileId,
+    type_name: &str,
+) -> Option<DeclId> {
     // Collect import target FileIds without cloning ImportInfo.
     let import_fids: Vec<FileId>;
     if let Some(fi) = st.files.get(&origin_file) {
