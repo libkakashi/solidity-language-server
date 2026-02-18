@@ -203,8 +203,8 @@ fn get_dot_completions(
                 append_using_for(st, file, scope, type_text, &mut items);
                 return items;
             }
-            // User-defined type members.
-            let members = st.members_of(type_text, file);
+            // User-defined type members (including inherited).
+            let members = st.all_members_of(type_text, file);
             if !members.is_empty() {
                 let mut items: Vec<CompletionItem> =
                     members.iter().map(member_to_completion).collect();
@@ -221,7 +221,7 @@ fn get_dot_completions(
     }
 
     // Try members_of directly (e.g. "ContractName." or "EnumName.")
-    let members = st.members_of(&identifier, file);
+    let members = st.all_members_of(&identifier, file);
     if !members.is_empty() {
         return members.iter().map(member_to_completion).collect();
     }
@@ -250,22 +250,58 @@ fn this_completions(
     cursor_byte: usize,
 ) -> Vec<CompletionItem> {
     if let Some(contract) = find_enclosing_contract(st, file, scope) {
+        // Collect direct members.
+        let mut all_members: Vec<&crate::symbol_table::MemberInfo> =
+            contract.members().iter().collect();
+
+        // Collect inherited members from base contracts.
+        let inherited = st.all_members_of(&contract.name, file);
+        let direct_names: std::collections::HashSet<&str> =
+            all_members.iter().map(|m| m.name.as_str()).collect();
+
+        // We need to filter inherited members. We can't borrow from `inherited`
+        // into the same vec since lifetimes differ, so build items directly.
+        let mut items: Vec<CompletionItem> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
+        // Helper: check if a member is an external/public function.
         let fi = match st.get_file_index(file) {
             Some(fi) => fi,
             None => return vec![],
         };
-        return contract
-            .members()
-            .iter()
-            .filter(|m| {
-                m.kind == DeclKind::Function
-                    && m.decl_id
-                        .and_then(|did| fi.declarations.get(&did))
-                        .and_then(|d| d.visibility.as_deref())
-                        .map_or(false, |v| v == "external" || v == "public")
-            })
-            .map(member_to_completion)
-            .collect();
+        for m in contract.members() {
+            if m.kind == DeclKind::Function
+                && m.decl_id
+                    .and_then(|did| fi.declarations.get(&did))
+                    .and_then(|d| d.visibility.as_deref())
+                    .map_or(false, |v| v == "external" || v == "public")
+            {
+                if seen.insert(m.name.clone()) {
+                    items.push(member_to_completion(m));
+                }
+            }
+        }
+
+        // Add inherited external/public functions.
+        for m in &inherited {
+            if m.kind == DeclKind::Function && !seen.contains(&m.name) {
+                // For inherited members, check visibility via the member's decl_id.
+                let is_visible = m
+                    .decl_id
+                    .and_then(|did| {
+                        let target_fi = st.files.get(&did.file)?;
+                        target_fi.declarations.get(&did)
+                    })
+                    .and_then(|d| d.visibility.as_deref())
+                    .map_or(false, |v| v == "external" || v == "public");
+                if is_visible {
+                    seen.insert(m.name.clone());
+                    items.push(member_to_completion(m));
+                }
+            }
+        }
+
+        return items;
     }
 
     // Fallback for parse-error cases: find contract body range from text,
@@ -273,7 +309,7 @@ fn this_completions(
     this_completions_fallback(st, file, source, cursor_byte)
 }
 
-/// `super.` — show members from parent contracts.
+/// `super.` — show members from parent contracts (including grandparents).
 fn super_completions(
     st: &SymbolTable,
     file: &Path,
@@ -283,9 +319,12 @@ fn super_completions(
 ) -> Vec<CompletionItem> {
     if let Some(contract) = find_enclosing_contract(st, file, scope) {
         let mut items = Vec::new();
+        let mut seen = std::collections::HashSet::new();
         for base_name in contract.base_contracts() {
-            for m in st.members_of(base_name, file) {
-                items.push(member_to_completion(m));
+            for m in &st.all_members_of(base_name, file) {
+                if seen.insert(m.name.clone()) {
+                    items.push(member_to_completion(m));
+                }
             }
         }
         return items;
@@ -880,8 +919,8 @@ fn call_result_completions(
     scope: usize,
 ) -> Vec<CompletionItem> {
     // First, check if `name` is a known type (contract, interface, struct, etc.)
-    // and show its instance members + using-for methods.
-    let members = st.members_of(name, file);
+    // and show its instance members (including inherited) + using-for methods.
+    let members = st.all_members_of(name, file);
     let mut items: Vec<CompletionItem> = members.iter().map(member_to_completion).collect();
     append_using_for(st, file, scope, name, &mut items);
 
@@ -901,12 +940,12 @@ fn call_result_completions(
                     append_using_for(st, file, scope, ret_type, &mut bi);
                     return bi;
                 }
-                // Try user-defined type members.
+                // Try user-defined type members (including inherited).
                 let base_type = ret_type
                     .replace(" memory", "")
                     .replace(" storage", "")
                     .replace(" calldata", "");
-                let ret_members = st.members_of(&base_type, file);
+                let ret_members = st.all_members_of(&base_type, file);
                 if !ret_members.is_empty() {
                     let mut ret_items: Vec<CompletionItem> =
                         ret_members.iter().map(member_to_completion).collect();

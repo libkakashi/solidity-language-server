@@ -628,6 +628,54 @@ impl SymbolTable {
         &[]
     }
 
+    /// Get all members of a named type including inherited members from base contracts.
+    pub fn all_members_of(&self, type_name: &str, path: &Path) -> Vec<MemberInfo> {
+        let file_id = match self.interner.lookup(path) {
+            Some(id) => id,
+            None => return vec![],
+        };
+        let mut result = Vec::new();
+        let mut seen = FxHashSet::default();
+        self.collect_all_members(file_id, type_name, &mut result, &mut seen);
+        result
+    }
+
+    /// Recursively collect members from a type and all its base contracts.
+    fn collect_all_members(
+        &self,
+        file_id: FileId,
+        type_name: &str,
+        result: &mut Vec<MemberInfo>,
+        seen: &mut FxHashSet<String>,
+    ) {
+        let decl_id = match find_type_declaration(self, file_id, type_name) {
+            Some(id) => id,
+            None => return,
+        };
+        let decl = match self.get_declaration(&decl_id) {
+            Some(d) => d,
+            None => return,
+        };
+
+        // Add direct members.
+        for m in decl.members() {
+            if seen.insert(m.name.clone()) {
+                result.push(m.clone());
+            }
+        }
+
+        // Recurse into base contracts.
+        if matches!(
+            decl.kind,
+            DeclKind::Contract | DeclKind::Interface | DeclKind::Library
+        ) {
+            let base_names: Vec<String> = decl.base_contracts().to_vec();
+            for base_name in &base_names {
+                self.collect_all_members(decl_id.file, base_name, result, seen);
+            }
+        }
+    }
+
     /// Find a type declaration by name (for external callers like completion).
     pub fn find_type_decl(&self, path: &Path, type_name: &str) -> Option<DeclId> {
         let file_id = self.interner.lookup(path)?;
