@@ -26,7 +26,7 @@
 | Document Formatting | **Y** | **Y** | - |
 | Range Formatting | **N** | **N** | Low |
 | Rename / Prepare Rename | **Y** | **Y** | - |
-| Document Highlight | **N** | **N** | Medium |
+| Document Highlight | **Y** | **N** | ~~Medium~~ Done |
 | Document Links | **Y** | **N** | - |
 | Folding Ranges | **N** | **N** | Medium |
 | Selection Ranges | **N** | **N** | Low |
@@ -45,7 +45,7 @@
 - [x] 4. Go to Type Definition — variable → type navigation
 - [x] 5. Go to Implementation — interface → concrete impl
 - [x] 6. Inlay Hints — parameter name hints at call sites
-- [ ] 7. Document Highlight — same-symbol highlighting
+- [x] 7. Document Highlight — same-symbol highlighting
 - [ ] 8. Folding Ranges — collapse functions, contracts, blocks
 - [ ] 9. Call Hierarchy — incoming/outgoing call navigation
 - [ ] 10. Type Hierarchy — contract inheritance tree

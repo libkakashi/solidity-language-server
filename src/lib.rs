@@ -2,6 +2,7 @@ pub mod code_actions;
 pub mod completion;
 pub mod document_highlight;
 pub mod fmt_config;
+pub mod folding_ranges;
 pub mod formatter;
 pub mod goto;
 pub mod hover;

@@ -2,6 +2,7 @@ use crate::code_actions;
 use crate::completion;
 use crate::document_highlight;
 use crate::fmt_config::{self, FmtConfig};
+use crate::folding_ranges;
 use crate::formatter;
 use crate::goto;
 use crate::hover;
@@ -320,6 +321,7 @@ impl LanguageServer for SolLsp {
                         work_done_progress: Some(false),
                     },
                 }),
+                folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
                 document_highlight_provider: Some(OneOf::Left(true)),
                 code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
                 semantic_tokens_provider: Some(
@@ -745,6 +747,27 @@ impl LanguageServer for SolLsp {
             &line_index,
             cached_tree.as_ref(),
         ))
+    }
+
+    async fn folding_range(
+        &self,
+        params: FoldingRangeParams,
+    ) -> tower_lsp::jsonrpc::Result<Option<Vec<FoldingRange>>> {
+        let uri = &params.text_document.uri;
+
+        let (_, source, line_index) = match self.get_source_and_path(uri).await {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+
+        let cached_tree = self.tree_cache.read().await.get(uri).cloned();
+
+        let ranges = folding_ranges::folding_ranges(&source, &line_index, cached_tree.as_ref());
+        if ranges.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(ranges))
+        }
     }
 
     async fn document_symbol(
