@@ -22,7 +22,7 @@
 | Document Symbols | **Y** | **Y** | - |
 | Workspace Symbols | **Y** | **N** | - |
 | Code Actions / Quick Fixes | **Y** (7 fixes) | **Y** (11 fixes) | ~~Critical~~ Done |
-| Code Lens | **N** | **N** | Medium |
+| Code Lens | **Y** | **N** | ~~Medium~~ Done |
 | Document Formatting | **Y** | **Y** | - |
 | Range Formatting | **N** | **N** | Low |
 | Rename / Prepare Rename | **Y** | **Y** | - |
@@ -49,7 +49,7 @@
 - [x] 8. Folding Ranges — collapse functions, contracts, blocks
 - [x] 9. Call Hierarchy — incoming/outgoing call navigation
 - [x] 10. Type Hierarchy — contract inheritance tree
-- [ ] 11. Code Lens — reference/implementation counts
+- [x] 11. Code Lens — reference/implementation counts
 - [ ] 12. Selection Ranges — smart expand/shrink selection
 
 ## Solidity-Specific Features

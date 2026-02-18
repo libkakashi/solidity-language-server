@@ -15,6 +15,7 @@ use crate::lint::LintEngine;
 use crate::parser::{self, TsParser};
 use crate::references;
 use crate::rename;
+use crate::selection_ranges;
 use crate::semantic_tokens;
 use crate::signature_help;
 use crate::solar_checker;
@@ -324,6 +325,7 @@ impl LanguageServer for SolLsp {
                         work_done_progress: Some(false),
                     },
                 }),
+                selection_range_provider: Some(SelectionRangeProviderCapability::Simple(true)),
                 folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
                 document_highlight_provider: Some(OneOf::Left(true)),
                 code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
@@ -770,6 +772,32 @@ impl LanguageServer for SolLsp {
         let cached_tree = self.tree_cache.read().await.get(uri).cloned();
 
         let ranges = folding_ranges::folding_ranges(&source, &line_index, cached_tree.as_ref());
+        if ranges.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(ranges))
+        }
+    }
+
+    async fn selection_range(
+        &self,
+        params: SelectionRangeParams,
+    ) -> tower_lsp::jsonrpc::Result<Option<Vec<SelectionRange>>> {
+        let uri = &params.text_document.uri;
+
+        let (_, source, line_index) = match self.get_source_and_path(uri).await {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+
+        let cached_tree = self.tree_cache.read().await.get(uri).cloned();
+
+        let ranges = selection_ranges::selection_ranges(
+            &source,
+            &params.positions,
+            &line_index,
+            cached_tree.as_ref(),
+        );
         if ranges.is_empty() {
             Ok(None)
         } else {
