@@ -171,7 +171,7 @@ function foo(uint256 x) public pure returns (uint256) {
     let (st, path) = index(source);
     let fi = get_fi(&st, &path);
     let foo = fi.declarations.values().find(|d| d.name == "foo").unwrap();
-    let natspec = foo.natspec.as_ref().unwrap();
+    let natspec = foo.natspec().unwrap();
     assert!(natspec.contains("@notice This is a test function"));
     assert!(natspec.contains("@param x The value"));
 }

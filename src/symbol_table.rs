@@ -179,6 +179,8 @@ pub struct DeclExtras {
     pub members: Vec<MemberInfo>,
     /// For enums: value names.
     pub enum_values: Vec<String>,
+    /// NatSpec from preceding comment nodes.
+    pub natspec: Option<String>,
 }
 
 /// A single declaration extracted from the CST.
@@ -199,8 +201,6 @@ pub struct Declaration {
     pub state_mutability: Option<String>,
     pub is_constant: bool,
     pub is_immutable: bool,
-    /// NatSpec from preceding comment nodes.
-    pub natspec: Option<String>,
     /// Heavy fields only allocated when needed. (Fix #9)
     pub extras: Option<Box<DeclExtras>>,
 }
@@ -244,6 +244,11 @@ impl Declaration {
             .as_ref()
             .map(|e| e.enum_values.as_slice())
             .unwrap_or(&[])
+    }
+
+    /// Get NatSpec documentation (returns None if none).
+    pub fn natspec(&self) -> Option<&str> {
+        self.extras.as_ref().and_then(|e| e.natspec.as_deref())
     }
 
     /// Get or create mutable extras.
@@ -1224,7 +1229,6 @@ fn make_decl(
         state_mutability: None,
         is_constant: false,
         is_immutable: false,
-        natspec: None,
         extras: None,
     };
     (decl_id, decl)
@@ -1363,7 +1367,9 @@ fn walk_contract(
         extras.base_contracts = base_contracts;
         extras.members = members;
     }
-    decl.natspec = natspec;
+    if natspec.is_some() {
+        decl.extras_mut().natspec = natspec;
+    }
 
     // Link the contract scope back to its owning declaration.
     fi.scopes[contract_scope].owner = Some(decl_id);
@@ -1406,7 +1412,9 @@ fn walk_function(
     );
     decl.visibility = visibility;
     decl.state_mutability = state_mutability;
-    decl.natspec = natspec;
+    if natspec.is_some() {
+        decl.extras_mut().natspec = natspec;
+    }
 
     if !parameters.is_empty() || !return_parameters.is_empty() {
         let extras = decl.extras_mut();
@@ -1461,10 +1469,12 @@ fn walk_constructor(
         state_mutability: None,
         is_constant: false,
         is_immutable: false,
-        natspec,
         extras: None,
     };
 
+    if natspec.is_some() {
+        decl.extras_mut().natspec = natspec;
+    }
     if !parameters.is_empty() {
         decl.extras_mut().parameters = parameters;
     }
@@ -1513,10 +1523,12 @@ fn walk_fallback_receive(
         state_mutability: extract_child_kind(node, "state_mutability", source),
         is_constant: false,
         is_immutable: false,
-        natspec,
         extras: None,
     };
 
+    if natspec.is_some() {
+        decl.extras_mut().natspec = natspec;
+    }
     if !parameters.is_empty() {
         decl.extras_mut().parameters = parameters;
     }
@@ -1554,7 +1566,9 @@ fn walk_modifier(
         DeclKind::Modifier,
         parent_scope,
     );
-    decl.natspec = natspec;
+    if natspec.is_some() {
+        decl.extras_mut().natspec = natspec;
+    }
 
     if !parameters.is_empty() {
         decl.extras_mut().parameters = parameters;
@@ -1604,7 +1618,9 @@ fn walk_state_variable(
     decl.visibility = visibility;
     decl.is_constant = is_constant;
     decl.is_immutable = is_immutable;
-    decl.natspec = natspec;
+    if natspec.is_some() {
+        decl.extras_mut().natspec = natspec;
+    }
 
     let name = decl.name.clone();
     fi.declarations.insert(decl_id, decl);
@@ -1644,7 +1660,9 @@ fn walk_constant_variable(
     );
     decl.type_text = type_text;
     decl.is_constant = true;
-    decl.natspec = natspec;
+    if natspec.is_some() {
+        decl.extras_mut().natspec = natspec;
+    }
 
     let name = decl.name.clone();
     fi.declarations.insert(decl_id, decl);
@@ -1714,7 +1732,9 @@ fn walk_struct(node: &Node, scope_id: ScopeId, file_id: FileId, source: &str, fi
         DeclKind::Struct,
         scope_id,
     );
-    decl.natspec = natspec;
+    if natspec.is_some() {
+        decl.extras_mut().natspec = natspec;
+    }
 
     if !members.is_empty() {
         decl.extras_mut().members = members;
@@ -1760,7 +1780,6 @@ fn walk_enum(node: &Node, scope_id: ScopeId, file_id: FileId, source: &str, fi: 
                         state_mutability: None,
                         is_constant: false,
                         is_immutable: false,
-                        natspec: None,
                         extras: None,
                     };
                     fi.declarations.insert(val_decl_id, val_decl);
@@ -1784,7 +1803,9 @@ fn walk_enum(node: &Node, scope_id: ScopeId, file_id: FileId, source: &str, fi: 
 
     let (decl_id, mut decl) =
         make_decl(file_id, &name_node, node, source, DeclKind::Enum, scope_id);
-    decl.natspec = natspec;
+    if natspec.is_some() {
+        decl.extras_mut().natspec = natspec;
+    }
 
     if !enum_values.is_empty() || !members.is_empty() {
         let extras = decl.extras_mut();
@@ -1831,7 +1852,9 @@ fn walk_event(node: &Node, scope_id: ScopeId, file_id: FileId, source: &str, fi:
 
     let (decl_id, mut decl) =
         make_decl(file_id, &name_node, node, source, DeclKind::Event, scope_id);
-    decl.natspec = natspec;
+    if natspec.is_some() {
+        decl.extras_mut().natspec = natspec;
+    }
 
     if !params.is_empty() {
         decl.extras_mut().parameters = params;
@@ -1882,7 +1905,9 @@ fn walk_error_decl(
 
     let (decl_id, mut decl) =
         make_decl(file_id, &name_node, node, source, DeclKind::Error, scope_id);
-    decl.natspec = natspec;
+    if natspec.is_some() {
+        decl.extras_mut().natspec = natspec;
+    }
 
     if !params.is_empty() {
         decl.extras_mut().parameters = params;
@@ -2036,7 +2061,6 @@ fn walk_import(node: &Node, scope_id: ScopeId, file_id: FileId, source: &str, fi
             state_mutability: None,
             is_constant: false,
             is_immutable: false,
-            natspec: None,
             extras: None,
         };
         fi.declarations.insert(decl_id, decl);
@@ -2067,7 +2091,6 @@ fn walk_import(node: &Node, scope_id: ScopeId, file_id: FileId, source: &str, fi
                         state_mutability: None,
                         is_constant: false,
                         is_immutable: false,
-                        natspec: None,
                         extras: None,
                     };
                     fi.declarations.insert(decl_id, decl);
@@ -2216,7 +2239,6 @@ fn inject_builtin_globals(fi: &mut FileIndex) {
                 state_mutability: None,
                 is_constant: false,
                 is_immutable: false,
-                natspec: None,
                 extras: None,
             };
             fi.declarations.insert(member_decl_id, member_decl);
@@ -2245,7 +2267,6 @@ fn inject_builtin_globals(fi: &mut FileIndex) {
             state_mutability: None,
             is_constant: false,
             is_immutable: false,
-            natspec: None,
             extras: None,
         };
         global_decl.extras_mut().members = members;
@@ -2278,7 +2299,6 @@ fn inject_builtin_defs(fi: &mut FileIndex, defs: BuiltinDef, register_scope: boo
                 state_mutability: None,
                 is_constant: false,
                 is_immutable: false,
-                natspec: None,
                 extras: None,
             };
             fi.declarations.insert(member_decl_id, member_decl);
@@ -2307,7 +2327,6 @@ fn inject_builtin_defs(fi: &mut FileIndex, defs: BuiltinDef, register_scope: boo
             state_mutability: None,
             is_constant: false,
             is_immutable: false,
-            natspec: None,
             extras: None,
         };
         type_decl.extras_mut().members = members;

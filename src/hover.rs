@@ -21,7 +21,7 @@ pub fn hover_info(
     let sig = build_signature(decl);
     parts.push(format!("```solidity\n{sig}\n```"));
 
-    if let Some(ref natspec) = decl.natspec {
+    if let Some(natspec) = decl.natspec() {
         let formatted = format_natspec(natspec);
         if !formatted.is_empty() {
             parts.push(format!("---\n{formatted}"));
