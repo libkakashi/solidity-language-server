@@ -13,7 +13,9 @@ type HashMap<K, V> = FxHashMap<K, V>;
 pub const SYNTHETIC_BASE: usize = usize::MAX - 1000;
 
 /// (global_name, offset, &[(member_name, type_text, member_offset)])
-const BUILTIN_GLOBALS: &[(&str, usize, &[(&str, &str, usize)])] = &[
+type BuiltinDef = &'static [(&'static str, usize, &'static [(&'static str, &'static str, usize)])];
+
+const BUILTIN_GLOBALS: BuiltinDef = &[
     ("msg", SYNTHETIC_BASE, &[
         ("data", "bytes calldata", SYNTHETIC_BASE + 1),
         ("sender", "address", SYNTHETIC_BASE + 2),
@@ -34,6 +36,26 @@ const BUILTIN_GLOBALS: &[(&str, usize, &[(&str, &str, usize)])] = &[
     ("tx", SYNTHETIC_BASE + 30, &[
         ("gasprice", "uint256", SYNTHETIC_BASE + 31),
         ("origin", "address", SYNTHETIC_BASE + 32),
+    ]),
+];
+
+/// Built-in types — these are found via `find_type_declaration()` but NOT
+/// registered in scope 0 (they are types, not visible variables).
+const BUILTIN_TYPES: BuiltinDef = &[
+    ("address", SYNTHETIC_BASE + 100, &[
+        ("balance", "uint256", SYNTHETIC_BASE + 101),
+        ("code", "bytes memory", SYNTHETIC_BASE + 102),
+        ("codehash", "bytes32", SYNTHETIC_BASE + 103),
+        ("transfer", "function(uint256)", SYNTHETIC_BASE + 104),
+        ("send", "function(uint256) returns (bool)", SYNTHETIC_BASE + 105),
+        ("call", "function(bytes memory) returns (bool, bytes memory)", SYNTHETIC_BASE + 106),
+        ("delegatecall", "function(bytes memory) returns (bool, bytes memory)", SYNTHETIC_BASE + 107),
+        ("staticcall", "function(bytes memory) returns (bool, bytes memory)", SYNTHETIC_BASE + 108),
+    ]),
+    ("__builtin_array", SYNTHETIC_BASE + 200, &[
+        ("length", "uint256", SYNTHETIC_BASE + 201),
+        ("push", "function", SYNTHETIC_BASE + 202),
+        ("pop", "function", SYNTHETIC_BASE + 203),
     ]),
 ];
 
@@ -604,6 +626,12 @@ impl SymbolTable {
         }
 
         &[]
+    }
+
+    /// Find a type declaration by name (for external callers like completion).
+    pub fn find_type_decl(&self, path: &Path, type_name: &str) -> Option<DeclId> {
+        let file_id = self.interner.lookup(path)?;
+        find_type_declaration(self, file_id, type_name)
     }
 
     /// Find the scope containing a given byte offset in a file. (Fix #5)
@@ -2042,6 +2070,70 @@ fn inject_builtin_globals(fi: &mut FileIndex) {
         fi.declarations.insert(global_decl_id, global_decl);
         register_in_scope(fi, 0, global_name, &global_decl_id);
     }
+
+    // Inject built-in types (address, __builtin_array).
+    // NOT registered in scope — only discoverable via find_type_declaration().
+    inject_builtin_defs(fi, BUILTIN_TYPES, false);
+}
+
+fn inject_builtin_defs(fi: &mut FileIndex, defs: BuiltinDef, register_scope: bool) {
+    for &(type_name, type_offset, members_data) in defs {
+        let mut members = Vec::with_capacity(members_data.len());
+        for &(mname, mtype, moffset) in members_data {
+            let member_decl_id = DeclId {
+                file: fi.file_id,
+                byte_offset: moffset,
+            };
+            let member_decl = Declaration {
+                id: member_decl_id,
+                name: mname.to_string(),
+                kind: DeclKind::StateVariable,
+                full_range: (moffset, moffset),
+                name_range: (moffset, moffset),
+                scope: 0,
+                type_text: Some(mtype.to_string()),
+                visibility: None,
+                state_mutability: None,
+                is_constant: false,
+                is_immutable: false,
+                natspec: None,
+                extras: None,
+            };
+            fi.declarations.insert(member_decl_id, member_decl);
+            members.push(MemberInfo {
+                name: mname.to_string(),
+                type_text: mtype.to_string(),
+                kind: DeclKind::StateVariable,
+                name_range: (moffset, moffset),
+                decl_id: Some(member_decl_id),
+            });
+        }
+
+        let type_decl_id = DeclId {
+            file: fi.file_id,
+            byte_offset: type_offset,
+        };
+        let mut type_decl = Declaration {
+            id: type_decl_id,
+            name: type_name.to_string(),
+            kind: DeclKind::Struct,
+            full_range: (type_offset, type_offset),
+            name_range: (type_offset, type_offset),
+            scope: 0,
+            type_text: None,
+            visibility: None,
+            state_mutability: None,
+            is_constant: false,
+            is_immutable: false,
+            natspec: None,
+            extras: None,
+        };
+        type_decl.extras_mut().members = members;
+        fi.declarations.insert(type_decl_id, type_decl);
+        if register_scope {
+            register_in_scope(fi, 0, type_name, &type_decl_id);
+        }
+    }
 }
 
 fn register_in_scope(fi: &mut FileIndex, scope_id: ScopeId, name: &str, decl_id: &DeclId) {
@@ -2627,7 +2719,19 @@ fn resolve_member(
     let container_decl_id = {
         let fi = st.files.get(&file_id)?;
         let container_ref = fi.references.get(container_ref_idx)?;
-        container_ref.resolved?
+        match container_ref.resolved {
+            Some(id) => id,
+            None => {
+                // Container unresolved — check for "super".
+                let scope = container_ref.scope;
+                let source = st.sources.get(&file_id)?;
+                let ref_text = &source[container_ref.range.0..container_ref.range.1];
+                if ref_text == "super" {
+                    return resolve_super_member(st, file_id, scope, member_name);
+                }
+                return None;
+            }
+        }
     };
 
     // 2. Get the container declaration.
@@ -2649,9 +2753,23 @@ fn resolve_member(
         | DeclKind::Parameter
         | DeclKind::Constant => {
             let type_text = st.get_declaration(&container_decl_id)?.type_text.clone()?;
+
+            // Check for array types first (type_text contains '[').
+            if type_text.contains('[') {
+                if let Some(arr_decl_id) =
+                    find_type_declaration(st, container_file, "__builtin_array")
+                {
+                    if let Some(result) = find_member_by_decl_id(st, &arr_decl_id, member_name) {
+                        return Some(result);
+                    }
+                }
+            }
+
             let base_type = strip_type_modifiers(&type_text);
+            // Handle "address payable" → "address".
+            let lookup_type = base_type.strip_suffix(" payable").unwrap_or(base_type);
             // Try regular type-based member lookup first.
-            if let Some(type_decl_id) = find_type_declaration(st, container_file, base_type) {
+            if let Some(type_decl_id) = find_type_declaration(st, container_file, lookup_type) {
                 let type_decl = st.get_declaration(&type_decl_id)?;
                 match type_decl.kind {
                     DeclKind::Contract | DeclKind::Interface | DeclKind::Library => {
@@ -2695,6 +2813,48 @@ fn resolve_member(
         }
         _ => None,
     }
+}
+
+/// Resolve `super.member` — find the enclosing contract, then search its
+/// base contracts for the member.
+fn resolve_super_member(
+    st: &SymbolTable,
+    file_id: FileId,
+    scope_id: ScopeId,
+    member_name: &str,
+) -> Option<DeclId> {
+    let fi = st.files.get(&file_id)?;
+    // Walk up the scope chain to find the enclosing contract.
+    let mut current = Some(scope_id);
+    while let Some(sid) = current {
+        let scope = fi.scopes.get(sid)?;
+        if matches!(
+            scope.kind,
+            ScopeKind::Contract | ScopeKind::Interface | ScopeKind::Library
+        ) {
+            // Find the contract declaration that owns this scope.
+            for decl in fi.declarations.values() {
+                if matches!(
+                    decl.kind,
+                    DeclKind::Contract | DeclKind::Interface | DeclKind::Library
+                ) && scope.range.0 >= decl.full_range.0
+                    && scope.range.1 <= decl.full_range.1
+                {
+                    // Search each base contract for the member.
+                    for base_name in decl.base_contracts() {
+                        if let Some(result) =
+                            resolve_in_base_contract(st, file_id, base_name, member_name)
+                        {
+                            return Some(result);
+                        }
+                    }
+                    return None;
+                }
+            }
+        }
+        current = scope.parent;
+    }
+    None
 }
 
 /// Resolve a name inside a base contract (for inheritance lookup).

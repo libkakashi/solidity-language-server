@@ -1271,3 +1271,138 @@ contract GasInfo {
         "Should show gasprice name, got: {text}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Built-in type member hover tests (address, array, super)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn hover_on_address_balance() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Wallet {
+    address public owner;
+
+    function getBalance() public view returns (uint256) {
+        return owner.balance;
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    // Hover on "balance" in "owner.balance"
+    let pos = source.find("owner.balance").unwrap() + "owner.".len();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col));
+    assert!(text.is_some(), "Should show hover for address.balance");
+    let text = text.unwrap();
+    assert!(
+        text.contains("uint256"),
+        "Should show uint256 type, got: {text}"
+    );
+    assert!(
+        text.contains("balance"),
+        "Should show balance name, got: {text}"
+    );
+}
+
+#[test]
+fn hover_on_array_length() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Store {
+    uint256[] public items;
+
+    function count() public view returns (uint256) {
+        return items.length;
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    // Hover on "length" in "items.length"
+    let pos = source.find("items.length").unwrap() + "items.".len();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col));
+    assert!(text.is_some(), "Should show hover for array.length");
+    let text = text.unwrap();
+    assert!(
+        text.contains("uint256"),
+        "Should show uint256 type, got: {text}"
+    );
+    assert!(
+        text.contains("length"),
+        "Should show length name, got: {text}"
+    );
+}
+
+#[test]
+fn hover_on_super_function() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Base {
+    function foo() public pure returns (uint256) {
+        return 42;
+    }
+}
+
+contract Child is Base {
+    function foo() public pure override returns (uint256) {
+        return super.foo();
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    // Hover on "foo" in "super.foo()"
+    let pos = source.find("super.foo").unwrap() + "super.".len();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col));
+    assert!(text.is_some(), "Should show hover for super.foo");
+    let text = text.unwrap();
+    assert!(
+        text.contains("function foo"),
+        "Should show function signature, got: {text}"
+    );
+}
+
+#[test]
+fn hover_on_enum_member_value() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Game {
+    enum Status { Active, Paused, Ended }
+
+    function start() public pure returns (Status) {
+        return Status.Active;
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    // Hover on "Active" in "Status.Active" in return statement
+    let pos = source.find("return Status.Active").unwrap() + "return Status.".len();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col));
+    assert!(
+        text.is_some(),
+        "Should show hover for enum member via Status.Active"
+    );
+    let text = text.unwrap();
+    assert!(
+        text.contains("Active"),
+        "Should show enum value name, got: {text}"
+    );
+}

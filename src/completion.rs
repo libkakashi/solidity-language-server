@@ -129,7 +129,7 @@ fn get_dot_completions(
     // Check for `type(X).` before anything else — extract_identifier_before_dot
     // would only extract "type" and miss the inner type argument.
     if let Some(inner_type) = extract_type_call_before_dot(line, col_byte) {
-        return type_members_for(&inner_type);
+        return type_members_for(&inner_type, st, file);
     }
 
     let identifier = match extract_identifier_before_dot(line, col_byte) {
@@ -537,25 +537,42 @@ fn extract_type_call_before_dot(line: &str, col_byte: u32) -> Option<String> {
 }
 
 /// Return type-specific members for `type(X).` expressions.
-fn type_members_for(type_name: &str) -> Vec<CompletionItem> {
+fn type_members_for(type_name: &str, st: &SymbolTable, file: &Path) -> Vec<CompletionItem> {
     let is_int = type_name.starts_with("uint") || type_name.starts_with("int");
-
-    let mut pairs: Vec<(&str, &str)> = Vec::new();
     if is_int {
-        pairs.push(("min", type_name));
-        pairs.push(("max", type_name));
-    } else {
-        // Contract / interface type.
-        pairs.push(("name", "string"));
-        pairs.push(("creationCode", "bytes memory"));
-        pairs.push(("runtimeCode", "bytes memory"));
-        pairs.push(("interfaceId", "bytes4"));
-        pairs.push(("min", "T"));
-        pairs.push(("max", "T"));
+        return make_type_items(&[("min", type_name), ("max", type_name)]);
     }
 
+    // Look up the type declaration to determine its kind.
+    if let Some(decl_id) = st.find_type_decl(file, type_name) {
+        if let Some(decl) = st.get_declaration(&decl_id) {
+            return match decl.kind {
+                DeclKind::Enum => make_type_items(&[("min", type_name), ("max", type_name)]),
+                DeclKind::Interface => {
+                    make_type_items(&[("name", "string"), ("interfaceId", "bytes4")])
+                }
+                _ => make_type_items(&[
+                    ("name", "string"),
+                    ("creationCode", "bytes memory"),
+                    ("runtimeCode", "bytes memory"),
+                    ("interfaceId", "bytes4"),
+                ]),
+            };
+        }
+    }
+
+    // Fallback: contract-like type.
+    make_type_items(&[
+        ("name", "string"),
+        ("creationCode", "bytes memory"),
+        ("runtimeCode", "bytes memory"),
+        ("interfaceId", "bytes4"),
+    ])
+}
+
+fn make_type_items(pairs: &[(&str, &str)]) -> Vec<CompletionItem> {
     pairs
-        .into_iter()
+        .iter()
         .map(|(label, detail)| CompletionItem {
             label: label.to_string(),
             kind: Some(CompletionItemKind::PROPERTY),
