@@ -340,7 +340,7 @@ fn append_inherited_public_functions(
     let mut base_decls = Vec::new();
     let mut base_seen = FxHashSet::default();
     for base_name in base_names {
-        st.collect_base_declarations_pub(fi.file_id, base_name, &mut base_decls, &mut base_seen);
+        st.collect_base_declarations(fi.file_id, base_name, &mut base_decls, &mut base_seen);
     }
     for d in &base_decls {
         if is_public_function(d) && seen.insert(d.name.clone()) {
