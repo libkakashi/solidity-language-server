@@ -2679,8 +2679,8 @@ fn find_top_level_by_name<'a>(fi: &'a FileIndex, name: &str) -> Option<&'a Decla
 // ---------------------------------------------------------------------------
 
 fn resolve_references(st: &mut SymbolTable, file_id: FileId) {
-    // Collect the data we need to resolve without holding a mutable borrow.
-    let (unresolved, scope_snapshot, import_snapshot, source) = {
+    // Collect unresolved references without holding a mutable borrow.
+    let (unresolved, source) = {
         let fi = match st.files.get(&file_id) {
             Some(fi) => fi,
             None => return,
@@ -2693,32 +2693,20 @@ fn resolve_references(st: &mut SymbolTable, file_id: FileId) {
             .filter(|(_, r)| r.resolved.is_none())
             .map(|(i, r)| (i, r.range.0, r.range.1, r.scope, r.member_of))
             .collect();
-        // We only clone the scope declarations (Vec<(String, DeclId)>) and imports,
-        // not the full declarations HashMap.
-        let scope_snapshot: Vec<(Option<ScopeId>, Vec<(String, DeclId)>)> = fi
-            .scopes
-            .iter()
-            .map(|s| (s.parent, s.declarations.clone()))
-            .collect();
-        let import_snapshot = fi.imports.clone();
-        (unresolved, scope_snapshot, import_snapshot, source)
+        (unresolved, source)
     };
 
-    // Pass 1: resolve non-member references (normal scope-chain + imports).
+    // Pass 1: batch-resolve non-member references, then apply.
+    let mut pass1_results: Vec<(usize, usize, usize, Option<DeclId>)> = Vec::new();
     for &(idx, start, end, scope_id, member_of) in &unresolved {
         if member_of.is_some() {
             continue;
         }
         let name = &source[start..end];
-        let resolved = resolve_single(
-            name,
-            scope_id,
-            &scope_snapshot,
-            &import_snapshot,
-            file_id,
-            st,
-        );
-
+        let resolved = resolve_single(name, scope_id, file_id, st);
+        pass1_results.push((idx, start, end, resolved));
+    }
+    for (idx, start, end, resolved) in pass1_results {
         if let Some(ref decl_id) = resolved {
             st.ref_index
                 .entry(*decl_id)
@@ -2736,13 +2724,13 @@ fn resolve_references(st: &mut SymbolTable, file_id: FileId) {
         }
     }
 
-    // Pass 2: resolve member references (property part of dot expressions).
+    // Pass 2: resolve member references one at a time (each may depend on
+    // the previous result for chained access like a.b.c).
     for &(idx, start, end, _scope_id, member_of) in &unresolved {
         let container_ref_idx = match member_of {
             Some(i) => i,
             None => continue,
         };
-
         let member_name = &source[start..end];
         let resolved = resolve_member(st, file_id, container_ref_idx, member_name);
 
@@ -2767,52 +2755,47 @@ fn resolve_references(st: &mut SymbolTable, file_id: FileId) {
 fn resolve_single(
     name: &str,
     scope_id: ScopeId,
-    scopes: &[(Option<ScopeId>, Vec<(String, DeclId)>)],
-    imports: &[ImportInfo],
     file_id: FileId,
     st: &SymbolTable,
 ) -> Option<DeclId> {
+    let fi = st.files.get(&file_id)?;
+
     // 1. Walk up scope tree.
     let mut current = Some(scope_id);
     while let Some(sid) = current {
-        if let Some((parent, decls)) = scopes.get(sid) {
-            if let Some((_, decl_id)) = decls.iter().find(|(n, _)| n == name) {
+        if let Some(scope) = fi.scopes.get(sid) {
+            if let Some(decl_id) = scope.get_decl(name) {
                 return Some(*decl_id);
             }
-            current = *parent;
+            current = scope.parent;
         } else {
             break;
         }
     }
 
     // 1.5. Search inherited base contracts.
-    // Walk the scope chain again to find the enclosing contract scope, then
-    // search base contracts for the name.
-    if let Some(fi) = st.files.get(&file_id) {
-        let mut current = Some(scope_id);
-        while let Some(sid) = current {
-            if let Some(scope) = fi.scopes.get(sid) {
-                if matches!(scope.kind, ScopeKind::Contract | ScopeKind::Interface) {
-                    if let Some(decl) = scope.owner.and_then(|id| fi.declarations.get(&id)) {
-                        for base_name in decl.base_contracts() {
-                            if let Some(result) =
-                                resolve_in_base_contract(st, file_id, base_name, name)
-                            {
-                                return Some(result);
-                            }
+    let mut current = Some(scope_id);
+    while let Some(sid) = current {
+        if let Some(scope) = fi.scopes.get(sid) {
+            if matches!(scope.kind, ScopeKind::Contract | ScopeKind::Interface) {
+                if let Some(decl) = scope.owner.and_then(|id| fi.declarations.get(&id)) {
+                    for base_name in decl.base_contracts() {
+                        if let Some(result) = resolve_in_base_contract(st, file_id, base_name, name)
+                        {
+                            return Some(result);
                         }
                     }
-                    break;
                 }
-                current = scope.parent;
-            } else {
                 break;
             }
+            current = scope.parent;
+        } else {
+            break;
         }
     }
 
     // 2. Check imports.
-    for imp in imports {
+    for imp in &fi.imports {
         match &imp.kind {
             ImportKind::Named(names) => {
                 for (import_name, alias) in names {
@@ -2845,11 +2828,9 @@ fn resolve_single(
             }
             ImportKind::Alias(alias) => {
                 if alias == name {
-                    if let Some(fi) = st.files.get(&file_id) {
-                        for decl in fi.declarations.values() {
-                            if decl.name == name && decl.kind == DeclKind::ImportAlias {
-                                return Some(decl.id);
-                            }
+                    for decl in fi.declarations.values() {
+                        if decl.name == name && decl.kind == DeclKind::ImportAlias {
+                            return Some(decl.id);
                         }
                     }
                 }
