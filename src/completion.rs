@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::sync::OnceLock;
 
+use rustc_hash::FxHashSet;
 use tower_lsp::lsp_types::{
     CompletionItem, CompletionItemKind, CompletionList, CompletionResponse, Position,
 };
@@ -168,6 +169,21 @@ fn get_dot_completions(
         }
 
         // Direct members (struct fields, contract functions, etc.)
+        // For contracts/interfaces/libraries, also include inherited members.
+        if matches!(
+            decl.kind,
+            DeclKind::Contract | DeclKind::Interface | DeclKind::Library
+        ) {
+            let all = st.all_members_of(&decl.name, file);
+            if !all.is_empty() {
+                let mut items: Vec<CompletionItem> =
+                    all.iter().map(member_to_completion).collect();
+                if let Some(ref tt) = decl.type_text {
+                    append_using_for(st, file, scope, tt, &mut items);
+                }
+                return items;
+            }
+        }
         let members = decl.members();
         if !members.is_empty() {
             let mut items: Vec<CompletionItem> =
@@ -241,7 +257,8 @@ fn append_using_for(
     items.extend(using_members.iter().map(member_to_completion));
 }
 
-/// `this.` — show external/public functions of the enclosing contract.
+/// `this.` — show external/public functions of the enclosing contract
+/// (including inherited ones).
 fn this_completions(
     st: &SymbolTable,
     file: &Path,
@@ -249,64 +266,109 @@ fn this_completions(
     source: &str,
     cursor_byte: usize,
 ) -> Vec<CompletionItem> {
+    let fi = match st.get_file_index(file) {
+        Some(fi) => fi,
+        None => return vec![],
+    };
+
+    // Try scope-based approach first (uses fi.declarations which have visibility).
     if let Some(contract) = find_enclosing_contract(st, file, scope) {
-        // Collect direct members.
-        let mut all_members: Vec<&crate::symbol_table::MemberInfo> =
-            contract.members().iter().collect();
-
-        // Collect inherited members from base contracts.
-        let inherited = st.all_members_of(&contract.name, file);
-        let direct_names: std::collections::HashSet<&str> =
-            all_members.iter().map(|m| m.name.as_str()).collect();
-
-        // We need to filter inherited members. We can't borrow from `inherited`
-        // into the same vec since lifetimes differ, so build items directly.
         let mut items: Vec<CompletionItem> = Vec::new();
         let mut seen = std::collections::HashSet::new();
 
-        // Helper: check if a member is an external/public function.
-        let fi = match st.get_file_index(file) {
-            Some(fi) => fi,
-            None => return vec![],
-        };
-        for m in contract.members() {
-            if m.kind == DeclKind::Function
-                && m.decl_id
-                    .and_then(|did| fi.declarations.get(&did))
-                    .and_then(|d| d.visibility.as_deref())
-                    .map_or(false, |v| v == "external" || v == "public")
+        // Collect own external/public functions from the contract's scope.
+        for s in &fi.scopes {
+            if matches!(
+                s.kind,
+                ScopeKind::Contract | ScopeKind::Interface | ScopeKind::Library
+            ) && s.range.0 >= contract.full_range.0
+                && s.range.1 <= contract.full_range.1
             {
-                if seen.insert(m.name.clone()) {
-                    items.push(member_to_completion(m));
+                for (name, did) in &s.declarations {
+                    if let Some(d) = fi.declarations.get(did) {
+                        if d.kind == DeclKind::Function
+                            && d.visibility
+                                .as_deref()
+                                .map_or(false, |v| v == "external" || v == "public")
+                        {
+                            if seen.insert(name.clone()) {
+                                items.push(CompletionItem {
+                                    label: d.name.clone(),
+                                    kind: Some(CompletionItemKind::FUNCTION),
+                                    detail: d.type_text.clone(),
+                                    ..Default::default()
+                                });
+                            }
+                        }
+                    }
                 }
+                break;
             }
         }
 
-        // Add inherited external/public functions.
-        for m in &inherited {
-            if m.kind == DeclKind::Function && !seen.contains(&m.name) {
-                // For inherited members, check visibility via the member's decl_id.
-                let is_visible = m
-                    .decl_id
-                    .and_then(|did| {
-                        let target_fi = st.files.get(&did.file)?;
-                        target_fi.declarations.get(&did)
-                    })
-                    .and_then(|d| d.visibility.as_deref())
-                    .map_or(false, |v| v == "external" || v == "public");
-                if is_visible {
-                    seen.insert(m.name.clone());
-                    items.push(member_to_completion(m));
-                }
+        // Collect inherited external/public functions from base contracts.
+        let mut base_decls = Vec::new();
+        let mut base_seen = FxHashSet::default();
+        for base_name in contract.base_contracts() {
+            st.collect_base_declarations_pub(fi.file_id, base_name, &mut base_decls, &mut base_seen);
+        }
+        for d in &base_decls {
+            if d.kind == DeclKind::Function
+                && d.visibility
+                    .as_deref()
+                    .map_or(false, |v| v == "external" || v == "public")
+                && seen.insert(d.name.clone())
+            {
+                items.push(CompletionItem {
+                    label: d.name.clone(),
+                    kind: Some(CompletionItemKind::FUNCTION),
+                    detail: d.type_text.clone(),
+                    ..Default::default()
+                });
             }
         }
 
-        return items;
+        if !items.is_empty() {
+            return items;
+        }
     }
 
     // Fallback for parse-error cases: find contract body range from text,
     // collect function declarations within it that are external/public.
-    this_completions_fallback(st, file, source, cursor_byte)
+    let mut items = this_completions_fallback(st, file, source, cursor_byte);
+
+    // Also add inherited members in the fallback path.
+    if let Some(base_names) = extract_base_contracts_from_text(&source[..cursor_byte]) {
+        let mut seen: std::collections::HashSet<String> =
+            items.iter().map(|i| i.label.clone()).collect();
+        let mut base_decls = Vec::new();
+        let mut base_seen = FxHashSet::default();
+        for base_name in &base_names {
+            st.collect_base_declarations_pub(
+                fi.file_id,
+                base_name,
+                &mut base_decls,
+                &mut base_seen,
+            );
+        }
+        for d in &base_decls {
+            if d.kind == DeclKind::Function
+                && d.visibility
+                    .as_deref()
+                    .map_or(false, |v| v == "external" || v == "public")
+                && seen.insert(d.name.clone())
+            {
+                items.push(CompletionItem {
+                    label: d.name.clone(),
+                    kind: Some(CompletionItemKind::FUNCTION),
+                    detail: d.type_text.clone(),
+                    ..Default::default()
+                });
+            }
+        }
+    }
+
+    items
 }
 
 /// `super.` — show members from parent contracts (including grandparents).
@@ -404,7 +466,7 @@ fn this_completions_fallback(
 
 /// Fallback for `super.` when parse errors prevent scope-based lookup.
 /// Extracts base contract names from the source text and looks up their
-/// members in the symbol table.
+/// members (including grandparent) in the symbol table.
 fn super_completions_fallback(
     st: &SymbolTable,
     file: &Path,
@@ -418,9 +480,12 @@ fn super_completions_fallback(
         None => return vec![],
     };
     let mut items = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     for base_name in &base_names {
-        for m in st.members_of(base_name, file) {
-            items.push(member_to_completion(m));
+        for m in &st.all_members_of(base_name, file) {
+            if seen.insert(m.name.clone()) {
+                items.push(member_to_completion(m));
+            }
         }
     }
     items

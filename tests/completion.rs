@@ -1262,3 +1262,312 @@ contract C is A, B {
         "override() should suggest base contract B"
     );
 }
+
+#[test]
+fn dot_completion_on_variable_includes_inherited_members() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Base {
+    function baseFunc() public pure returns (uint256) {
+        return 1;
+    }
+}
+
+contract Derived is Base {
+    function derivedFunc() public pure returns (uint256) {
+        return 2;
+    }
+}
+
+contract User {
+    function test() public {
+        Derived d;
+        d.
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    let dot_pos = source.find("d.\n").unwrap() + "d.".len();
+    let line = source[..dot_pos].matches('\n').count() as u32;
+    let col = (dot_pos - source[..dot_pos].rfind('\n').unwrap() - 1) as u32;
+
+    let labels = completion_labels(&st, &path, source, Position::new(line, col), Some("."));
+
+    assert!(
+        labels.contains(&"derivedFunc".to_string()),
+        "d. should include own function 'derivedFunc', got: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"baseFunc".to_string()),
+        "d. should include inherited function 'baseFunc', got: {labels:?}"
+    );
+}
+
+#[test]
+fn dot_completion_on_contract_name_includes_inherited() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Base {
+    function baseFunc() public pure returns (uint256) {
+        return 1;
+    }
+}
+
+contract Derived is Base {
+    function derivedFunc() public pure returns (uint256) {
+        return 2;
+    }
+}
+
+contract User {
+    function test() public {
+        Derived.
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    let dot_pos = source.find("Derived.\n").unwrap() + "Derived.".len();
+    let line = source[..dot_pos].matches('\n').count() as u32;
+    let col = (dot_pos - source[..dot_pos].rfind('\n').unwrap() - 1) as u32;
+
+    let labels = completion_labels(&st, &path, source, Position::new(line, col), Some("."));
+
+    assert!(
+        labels.contains(&"derivedFunc".to_string()),
+        "Derived. should include own function 'derivedFunc', got: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"baseFunc".to_string()),
+        "Derived. should include inherited function 'baseFunc', got: {labels:?}"
+    );
+}
+
+#[test]
+fn dot_completion_this_includes_inherited_public() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Base {
+    function basePub() public pure returns (uint256) {
+        return 1;
+    }
+    function baseInternal() internal pure returns (uint256) {
+        return 2;
+    }
+}
+
+contract Derived is Base {
+    function ownPub() public pure returns (uint256) {
+        return 3;
+    }
+
+    function test() public {
+        this.
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    let dot_pos = source.find("this.\n").unwrap() + "this.".len();
+    let line = source[..dot_pos].matches('\n').count() as u32;
+    let col = (dot_pos - source[..dot_pos].rfind('\n').unwrap() - 1) as u32;
+
+    let labels = completion_labels(&st, &path, source, Position::new(line, col), Some("."));
+
+    assert!(
+        labels.contains(&"ownPub".to_string()),
+        "this. should include own public function, got: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"basePub".to_string()),
+        "this. should include inherited public function, got: {labels:?}"
+    );
+    assert!(
+        !labels.contains(&"baseInternal".to_string()),
+        "this. should NOT include inherited internal function"
+    );
+}
+
+#[test]
+fn dot_completion_super_includes_grandparent() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Grandparent {
+    function grandFunc() public pure returns (uint256) {
+        return 1;
+    }
+}
+
+contract Parent is Grandparent {
+    function parentFunc() public pure returns (uint256) {
+        return 2;
+    }
+}
+
+contract Child is Parent {
+    function test() public {
+        super.
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    let dot_pos = source.find("super.\n").unwrap() + "super.".len();
+    let line = source[..dot_pos].matches('\n').count() as u32;
+    let col = (dot_pos - source[..dot_pos].rfind('\n').unwrap() - 1) as u32;
+
+    let labels = completion_labels(&st, &path, source, Position::new(line, col), Some("."));
+
+    assert!(
+        labels.contains(&"parentFunc".to_string()),
+        "super. should include parent function, got: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"grandFunc".to_string()),
+        "super. should include grandparent function, got: {labels:?}"
+    );
+}
+
+#[test]
+fn dot_completion_cross_file_inherited_members() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut parser = TsParser::new();
+    let resolver = ImportResolver::with_root(tmp.path().to_path_buf());
+
+    let base_source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Base {
+    function baseFunc() public pure returns (uint256) {
+        return 1;
+    }
+}
+"#;
+    let base_path = tmp.path().join("Base.sol");
+    std::fs::write(&base_path, base_source).unwrap();
+
+    let main_source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+import {Base} from "./Base.sol";
+
+contract Derived is Base {
+    function derivedFunc() public pure returns (uint256) {
+        return 2;
+    }
+}
+
+contract User {
+    function test() public {
+        Derived d;
+        d.
+    }
+}
+"#;
+    let main_path = tmp.path().join("Main.sol");
+    std::fs::write(&main_path, main_source).unwrap();
+
+    let mut st = SymbolTable::new(resolver);
+    st.index_file(&base_path, base_source, &mut parser);
+    st.resolve_file_references(&base_path, &mut parser);
+    st.index_file(&main_path, main_source, &mut parser);
+    st.resolve_file_references(&main_path, &mut parser);
+
+    let dot_pos = main_source.find("d.\n").unwrap() + "d.".len();
+    let line = main_source[..dot_pos].matches('\n').count() as u32;
+    let col = (dot_pos - main_source[..dot_pos].rfind('\n').unwrap() - 1) as u32;
+
+    let labels = completion_labels(
+        &st,
+        &main_path,
+        main_source,
+        Position::new(line, col),
+        Some("."),
+    );
+
+    assert!(
+        labels.contains(&"derivedFunc".to_string()),
+        "d. should include 'derivedFunc', got: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"baseFunc".to_string()),
+        "d. should include inherited 'baseFunc' from cross-file Base, got: {labels:?}"
+    );
+}
+
+#[test]
+fn import_completion_suggests_exports() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut parser = TsParser::new();
+    let resolver = ImportResolver::with_root(tmp.path().to_path_buf());
+
+    let lib_source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract MyContract {
+    function foo() public {}
+}
+
+interface IToken {
+    function transfer(address to, uint256 amount) external;
+}
+
+library MathLib {
+    function add(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a + b;
+    }
+}
+
+struct Point {
+    uint256 x;
+    uint256 y;
+}
+"#;
+    let lib_path = tmp.path().join("Lib.sol");
+    std::fs::write(&lib_path, lib_source).unwrap();
+
+    let main_source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+import { } from "./Lib.sol";
+"#;
+    let main_path = tmp.path().join("Main.sol");
+    std::fs::write(&main_path, main_source).unwrap();
+
+    let mut st = SymbolTable::new(resolver);
+    st.index_file(&lib_path, lib_source, &mut parser);
+    st.resolve_file_references(&lib_path, &mut parser);
+    st.index_file(&main_path, main_source, &mut parser);
+    st.resolve_file_references(&main_path, &mut parser);
+
+    // Cursor inside `import { | } from "./Lib.sol";`
+    let cursor_pos = main_source.find("{ }").unwrap() + 2; // between { and }
+    let line = main_source[..cursor_pos].matches('\n').count() as u32;
+    let col = (cursor_pos - main_source[..cursor_pos].rfind('\n').unwrap() - 1) as u32;
+
+    let labels = completion_labels(
+        &st,
+        &main_path,
+        main_source,
+        Position::new(line, col),
+        None,
+    );
+
+    assert!(
+        labels.contains(&"MyContract".to_string()),
+        "import completion should suggest 'MyContract', got: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"IToken".to_string()),
+        "import completion should suggest 'IToken', got: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"MathLib".to_string()),
+        "import completion should suggest 'MathLib', got: {labels:?}"
+    );
+}

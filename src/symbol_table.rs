@@ -704,6 +704,17 @@ impl SymbolTable {
         self.files.get(&file_id)
     }
 
+    /// Public wrapper for collect_base_declarations.
+    pub fn collect_base_declarations_pub<'a>(
+        &'a self,
+        origin_file: FileId,
+        base_name: &str,
+        result: &mut Vec<&'a Declaration>,
+        seen: &mut FxHashSet<DeclId>,
+    ) {
+        self.collect_base_declarations(origin_file, base_name, result, seen);
+    }
+
     /// Collect declarations from a base contract (for inherited member completion).
     /// Recursively collects from grandparent bases too.
     fn collect_base_declarations<'a>(
