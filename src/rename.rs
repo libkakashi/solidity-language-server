@@ -7,12 +7,12 @@ use tower_lsp::lsp_types::{Position, Range, TextEdit, Url, WorkspaceEdit};
 use crate::symbol_table::SymbolTable;
 use crate::utils::LineIndex;
 
-/// Get the identifier at a given position (for prepare-rename).
-pub fn get_identifier_at_position(
+/// Find the byte span (start, end) of the identifier at `position`.
+fn find_identifier_span(
     source: &str,
     position: Position,
     line_index: &LineIndex,
-) -> Option<String> {
+) -> Option<(usize, usize)> {
     let abs_offset = line_index.position_to_byte_offset(source, position.line, position.character);
     let bytes = source.as_bytes();
 
@@ -30,13 +30,20 @@ pub fn get_identifier_at_position(
         end += 1;
     }
 
-    if start == end {
-        return None;
-    }
-    if bytes[start].is_ascii_digit() {
+    if start == end || bytes[start].is_ascii_digit() {
         return None;
     }
 
+    Some((start, end))
+}
+
+/// Get the identifier at a given position (for prepare-rename).
+pub fn get_identifier_at_position(
+    source: &str,
+    position: Position,
+    line_index: &LineIndex,
+) -> Option<String> {
+    let (start, end) = find_identifier_span(source, position, line_index)?;
     Some(source[start..end].to_string())
 }
 
@@ -46,30 +53,7 @@ pub fn get_identifier_range(
     position: Position,
     line_index: &LineIndex,
 ) -> Option<Range> {
-    let abs_offset = line_index.position_to_byte_offset(source, position.line, position.character);
-    let bytes = source.as_bytes();
-
-    if abs_offset >= bytes.len() {
-        return None;
-    }
-
-    let mut start = abs_offset;
-    let mut end = abs_offset;
-
-    while start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_') {
-        start -= 1;
-    }
-    while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
-        end += 1;
-    }
-
-    if start == end {
-        return None;
-    }
-    if bytes[start].is_ascii_digit() {
-        return None;
-    }
-
+    let (start, end) = find_identifier_span(source, position, line_index)?;
     Some(line_index.byte_range_to_lsp_range(source, start, end))
 }
 
