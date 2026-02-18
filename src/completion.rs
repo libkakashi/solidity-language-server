@@ -283,19 +283,8 @@ fn this_completions(
             {
                 for (name, did) in &s.declarations {
                     if let Some(d) = fi.declarations.get(did) {
-                        if d.kind == DeclKind::Function
-                            && d.visibility
-                                .as_deref()
-                                .map_or(false, |v| v == "external" || v == "public")
-                        {
-                            if seen.insert(name.clone()) {
-                                items.push(CompletionItem {
-                                    label: d.name.clone(),
-                                    kind: Some(CompletionItemKind::FUNCTION),
-                                    detail: d.type_text.clone(),
-                                    ..Default::default()
-                                });
-                            }
+                        if is_public_function(d) && seen.insert(name.clone()) {
+                            items.push(decl_to_function_completion(d));
                         }
                     }
                 }
@@ -304,31 +293,7 @@ fn this_completions(
         }
 
         // Collect inherited external/public functions from base contracts.
-        let mut base_decls = Vec::new();
-        let mut base_seen = FxHashSet::default();
-        for base_name in contract.base_contracts() {
-            st.collect_base_declarations_pub(
-                fi.file_id,
-                base_name,
-                &mut base_decls,
-                &mut base_seen,
-            );
-        }
-        for d in &base_decls {
-            if d.kind == DeclKind::Function
-                && d.visibility
-                    .as_deref()
-                    .map_or(false, |v| v == "external" || v == "public")
-                && seen.insert(d.name.clone())
-            {
-                items.push(CompletionItem {
-                    label: d.name.clone(),
-                    kind: Some(CompletionItemKind::FUNCTION),
-                    detail: d.type_text.clone(),
-                    ..Default::default()
-                });
-            }
-        }
+        append_inherited_public_functions(st, fi, contract.base_contracts(), &mut items, &mut seen);
 
         if !items.is_empty() {
             return items;
@@ -337,39 +302,51 @@ fn this_completions(
 
     // Fallback for parse-error cases: find contract body range from text,
     // collect function declarations within it that are external/public.
-    let mut items = this_completions_fallback(st, file, source, cursor_byte);
+    let mut items = this_completions_fallback(fi, source, cursor_byte);
 
     // Also add inherited members in the fallback path.
     if let Some(base_names) = extract_base_contracts_from_text(&source[..cursor_byte]) {
         let mut seen: FxHashSet<String> = items.iter().map(|i| i.label.clone()).collect();
-        let mut base_decls = Vec::new();
-        let mut base_seen = FxHashSet::default();
-        for base_name in &base_names {
-            st.collect_base_declarations_pub(
-                fi.file_id,
-                base_name,
-                &mut base_decls,
-                &mut base_seen,
-            );
-        }
-        for d in &base_decls {
-            if d.kind == DeclKind::Function
-                && d.visibility
-                    .as_deref()
-                    .map_or(false, |v| v == "external" || v == "public")
-                && seen.insert(d.name.clone())
-            {
-                items.push(CompletionItem {
-                    label: d.name.clone(),
-                    kind: Some(CompletionItemKind::FUNCTION),
-                    detail: d.type_text.clone(),
-                    ..Default::default()
-                });
-            }
-        }
+        append_inherited_public_functions(st, fi, &base_names, &mut items, &mut seen);
     }
 
     items
+}
+
+fn is_public_function(d: &crate::symbol_table::Declaration) -> bool {
+    d.kind == DeclKind::Function
+        && d.visibility
+            .as_deref()
+            .map_or(false, |v| v == "external" || v == "public")
+}
+
+fn decl_to_function_completion(d: &crate::symbol_table::Declaration) -> CompletionItem {
+    CompletionItem {
+        label: d.name.clone(),
+        kind: Some(CompletionItemKind::FUNCTION),
+        detail: d.type_text.clone(),
+        ..Default::default()
+    }
+}
+
+/// Append inherited external/public function completions from base contracts.
+fn append_inherited_public_functions(
+    st: &SymbolTable,
+    fi: &crate::symbol_table::FileIndex,
+    base_names: &[String],
+    items: &mut Vec<CompletionItem>,
+    seen: &mut FxHashSet<String>,
+) {
+    let mut base_decls = Vec::new();
+    let mut base_seen = FxHashSet::default();
+    for base_name in base_names {
+        st.collect_base_declarations_pub(fi.file_id, base_name, &mut base_decls, &mut base_seen);
+    }
+    for d in &base_decls {
+        if is_public_function(d) && seen.insert(d.name.clone()) {
+            items.push(decl_to_function_completion(d));
+        }
+    }
 }
 
 /// `super.` — show members from parent contracts (including grandparents).
@@ -448,15 +425,10 @@ fn find_enclosing_contract<'a>(
 /// collects external/public functions from the symbol table declarations
 /// whose ranges fall within the contract body.
 fn this_completions_fallback(
-    st: &SymbolTable,
-    file: &Path,
+    fi: &crate::symbol_table::FileIndex,
     source: &str,
     cursor_byte: usize,
 ) -> Vec<CompletionItem> {
-    let fi = match st.get_file_index(file) {
-        Some(fi) => fi,
-        None => return vec![],
-    };
     let (body_start, body_end) = match find_enclosing_contract_braces(source, cursor_byte) {
         Some(range) => range,
         None => return vec![],
@@ -464,19 +436,9 @@ fn this_completions_fallback(
     fi.declarations
         .values()
         .filter(|d| {
-            d.kind == DeclKind::Function
-                && d.full_range.0 >= body_start
-                && d.full_range.1 <= body_end
-                && d.visibility
-                    .as_deref()
-                    .map_or(false, |v| v == "external" || v == "public")
+            is_public_function(d) && d.full_range.0 >= body_start && d.full_range.1 <= body_end
         })
-        .map(|d| CompletionItem {
-            label: d.name.clone(),
-            kind: Some(CompletionItemKind::FUNCTION),
-            detail: d.type_text.clone(),
-            ..Default::default()
-        })
+        .map(|d| decl_to_function_completion(d))
         .collect()
 }
 
