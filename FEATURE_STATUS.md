@@ -31,7 +31,7 @@
 | Folding Ranges | **N** | **N** | Medium |
 | Selection Ranges | **N** | **N** | Low |
 | Semantic Tokens | **Y** (13 types) | **Y** | ~~High~~ Done |
-| Inlay Hints | **N** | **N** | **High** |
+| Inlay Hints | **Y** (param names) | **N** | ~~High~~ Done |
 | Call Hierarchy | **N** | **N** | Medium |
 | Type Hierarchy | **N** | **N** | Medium |
 | Workspace Folders | **P** (empty handler) | **Y** | Medium |
@@ -44,7 +44,7 @@
 - [x] 3. Semantic Tokens — 13 token types, 4 modifiers
 - [x] 4. Go to Type Definition — variable → type navigation
 - [x] 5. Go to Implementation — interface → concrete impl
-- [ ] 6. Inlay Hints — parameter names, type annotations
+- [x] 6. Inlay Hints — parameter name hints at call sites
 - [ ] 7. Document Highlight — same-symbol highlighting
 - [ ] 8. Folding Ranges — collapse functions, contracts, blocks
 - [ ] 9. Call Hierarchy — incoming/outgoing call navigation

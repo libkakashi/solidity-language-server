@@ -1,5 +1,6 @@
 use crate::code_actions;
 use crate::completion;
+use crate::document_highlight;
 use crate::fmt_config::{self, FmtConfig};
 use crate::formatter;
 use crate::goto;
@@ -319,6 +320,7 @@ impl LanguageServer for SolLsp {
                         work_done_progress: Some(false),
                     },
                 }),
+                document_highlight_provider: Some(OneOf::Left(true)),
                 code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
                 semantic_tokens_provider: Some(
                     SemanticTokensServerCapabilities::SemanticTokensOptions(
@@ -565,6 +567,28 @@ impl LanguageServer for SolLsp {
             Ok(None)
         } else {
             Ok(Some(locations))
+        }
+    }
+
+    async fn document_highlight(
+        &self,
+        params: DocumentHighlightParams,
+    ) -> tower_lsp::jsonrpc::Result<Option<Vec<DocumentHighlight>>> {
+        let uri = &params.text_document_position_params.text_document.uri;
+        let position = params.text_document_position_params.position;
+
+        let (file_path, source, line_index) = match self.get_source_and_path(uri).await {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+
+        let st = self.symbol_table.read().await;
+        let highlights =
+            document_highlight::document_highlight(&st, &file_path, &source, position, &line_index);
+        if highlights.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(highlights))
         }
     }
 

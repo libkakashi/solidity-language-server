@@ -1,5 +1,6 @@
 pub mod code_actions;
 pub mod completion;
+pub mod document_highlight;
 pub mod fmt_config;
 pub mod formatter;
 pub mod goto;
