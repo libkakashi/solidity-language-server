@@ -356,6 +356,29 @@ pub struct FileIndex {
     pub references: Vec<Reference>,
     pub imports: Vec<ImportInfo>,
     pub using_directives: Vec<UsingDirective>,
+    /// Sorted by start_byte for binary search in resolve_at.
+    decl_name_ranges: Vec<(usize, usize, DeclId)>,
+    /// Indices into `references`, sorted by range.0 for binary search.
+    ref_range_index: Vec<u32>,
+}
+
+impl FileIndex {
+    /// Rebuild the sorted lookup indices after declarations/references change.
+    fn rebuild_lookup_indices(&mut self) {
+        // Build sorted declaration name ranges.
+        self.decl_name_ranges = self
+            .declarations
+            .iter()
+            .map(|(_, d)| (d.name_range.0, d.name_range.1, d.id))
+            .collect();
+        self.decl_name_ranges
+            .sort_unstable_by_key(|&(start, _, _)| start);
+
+        // Build sorted reference range index.
+        let mut indices: Vec<u32> = (0..self.references.len() as u32).collect();
+        indices.sort_unstable_by_key(|&i| self.references[i as usize].range.0);
+        self.ref_range_index = indices;
+    }
 }
 
 /// Project-wide symbol table.
@@ -495,20 +518,31 @@ impl SymbolTable {
         let file_id = self.interner.lookup(path)?;
         let fi = self.files.get(&file_id)?;
 
-        // First check if cursor is directly on a declaration name.
-        for decl in fi.declarations.values() {
-            if decl.name_range.0 <= byte_offset && byte_offset < decl.name_range.1 {
-                return Some(decl);
+        // Binary search on sorted declaration name ranges.
+        let di = fi
+            .decl_name_ranges
+            .partition_point(|&(start, _, _)| start <= byte_offset);
+        if di > 0 {
+            let (start, end, ref id) = fi.decl_name_ranges[di - 1];
+            if start <= byte_offset && byte_offset < end {
+                return fi.declarations.get(id);
             }
         }
 
-        // Then check references.
-        let reference = fi
-            .references
-            .iter()
-            .find(|r| r.range.0 <= byte_offset && byte_offset < r.range.1)?;
-        let decl_id = reference.resolved.as_ref()?;
-        self.get_declaration(decl_id)
+        // Binary search on sorted reference range index.
+        let ri = fi
+            .ref_range_index
+            .partition_point(|&i| fi.references[i as usize].range.0 <= byte_offset);
+        if ri > 0 {
+            let ref_idx = fi.ref_range_index[ri - 1] as usize;
+            let reference = &fi.references[ref_idx];
+            if reference.range.0 <= byte_offset && byte_offset < reference.range.1 {
+                let decl_id = reference.resolved.as_ref()?;
+                return self.get_declaration(decl_id);
+            }
+        }
+
+        None
     }
 
     /// Get a declaration by its DeclId.
@@ -885,6 +919,8 @@ fn build_file_index(
         references: Vec::new(),
         imports: Vec::new(),
         using_directives: Vec::new(),
+        decl_name_ranges: Vec::new(),
+        ref_range_index: Vec::new(),
     };
 
     // Create file-level scope.
@@ -906,6 +942,9 @@ fn build_file_index(
 
     // Inject synthetic declarations for built-in globals (msg, block, tx).
     inject_builtin_globals(&mut fi);
+
+    // Build sorted indices for O(log n) lookup in resolve_at.
+    fi.rebuild_lookup_indices();
 
     fi
 }
