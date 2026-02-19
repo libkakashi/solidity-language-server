@@ -2094,3 +2094,66 @@ contract List {
         "Should complete with struct field 'price', got: {labels:?}"
     );
 }
+
+// ========== CHAINED MULTI-CALL COMPLETION TESTS ==========
+
+#[test]
+fn chained_call_completion() {
+    let source = "// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+interface IERC20 {
+    function balanceOf(address) external view returns (uint256);
+}
+
+contract Vault {
+    IERC20 public token;
+
+    function getToken() public view returns (IERC20) {
+        return token;
+    }
+
+    function check() public view {
+        getToken().
+    }
+}
+";
+    let (st, path) = setup(source);
+    // After `getToken().` (line 15, col 19)
+    let labels = completion_labels(&st, &path, source, Position::new(15, 19), Some("."));
+
+    assert!(
+        labels.contains(&"balanceOf".to_string()),
+        "Should complete with IERC20 method 'balanceOf' after getToken()., got: {labels:?}"
+    );
+}
+
+#[test]
+fn chained_member_then_call_completion() {
+    let source = "// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+interface IERC20 {
+    function balanceOf(address) external view returns (uint256);
+    function transfer(address, uint256) external returns (bool);
+}
+
+contract Vault {
+    IERC20 public token;
+
+    function check() public view {
+        token.balanceOf(msg.sender).
+    }
+}
+";
+    let (st, path) = setup(source);
+    // After `token.balanceOf(msg.sender).` (line 13, col 36)
+    let labels = completion_labels(&st, &path, source, Position::new(13, 36), Some("."));
+
+    // uint256 has no built-in members, so this should be empty
+    // (This test verifies the chain resolves without crashing)
+    assert!(
+        labels.is_empty() || !labels.contains(&"balanceOf".to_string()),
+        "Should NOT show IERC20 members after balanceOf() which returns uint256, got: {labels:?}"
+    );
+}

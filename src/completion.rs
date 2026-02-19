@@ -603,9 +603,15 @@ fn get_dot_completions(
         return type_members_for(&inner_type, st, file);
     }
 
-    // Check for `SomeType(args).` — type casts like `IERC20(token).`
+    // Check for `SomeType(args).` or chained calls like `a.foo().bar().`
     if let Some(type_name) = extract_call_before_dot(line, col_byte) {
         let scope = st.scope_at(file, cursor_byte).unwrap_or(0);
+        // Check if this is a chained call (dot before the function name).
+        if let Some(chain) = parse_member_chain(line, col_byte) {
+            if chain.len() >= 2 {
+                return resolve_chain_completions(st, file, &chain, scope);
+            }
+        }
         return call_result_completions(st, file, &type_name, scope);
     }
 
@@ -813,6 +819,257 @@ fn extract_mapping_value_type(type_text: &str) -> Option<String> {
         .unwrap_or(value_type)
         .trim();
     Some(clean.to_string())
+}
+
+/// A segment in a member chain like `a.foo().bar().`
+#[derive(Debug)]
+enum ChainSegment {
+    /// Simple identifier, e.g. `a`
+    Ident(String),
+    /// Function call, e.g. `foo()`
+    Call(String),
+}
+
+/// Parse a dotted member chain from right to left.
+/// E.g. `a.foo().bar().` → [Ident("a"), Call("foo"), Call("bar")]
+/// E.g. `token.balanceOf(addr).` → [Ident("token"), Call("balanceOf")]
+fn parse_member_chain(line: &str, col_byte: u32) -> Option<Vec<ChainSegment>> {
+    let col = col_byte as usize;
+    if col == 0 {
+        return None;
+    }
+    let bytes = line.as_bytes();
+    let mut pos = col;
+
+    // Skip trailing dot.
+    if pos > 0 && pos <= bytes.len() && bytes[pos - 1] == b'.' {
+        pos -= 1;
+    }
+
+    let mut segments = Vec::new();
+
+    loop {
+        if pos == 0 {
+            break;
+        }
+
+        // Check if current position ends with `)` (a call).
+        if bytes[pos - 1] == b')' {
+            pos -= 1;
+            // Scan back to matching `(`.
+            let mut depth: u32 = 1;
+            while pos > 0 && depth > 0 {
+                pos -= 1;
+                match bytes[pos] {
+                    b')' => depth += 1,
+                    b'(' => depth -= 1,
+                    _ => {}
+                }
+            }
+            if depth != 0 {
+                break;
+            }
+            // Extract identifier before `(`.
+            let end = pos;
+            while pos > 0 && (bytes[pos - 1].is_ascii_alphanumeric() || bytes[pos - 1] == b'_') {
+                pos -= 1;
+            }
+            if pos == end {
+                break;
+            }
+            let name = String::from_utf8_lossy(&bytes[pos..end]).to_string();
+            segments.push(ChainSegment::Call(name));
+        } else if bytes[pos - 1].is_ascii_alphanumeric() || bytes[pos - 1] == b'_' {
+            // Simple identifier.
+            let end = pos;
+            while pos > 0 && (bytes[pos - 1].is_ascii_alphanumeric() || bytes[pos - 1] == b'_') {
+                pos -= 1;
+            }
+            let name = String::from_utf8_lossy(&bytes[pos..end]).to_string();
+            segments.push(ChainSegment::Ident(name));
+        } else {
+            break;
+        }
+
+        // Check for dot separator.
+        if pos > 0 && bytes[pos - 1] == b'.' {
+            pos -= 1;
+        } else {
+            break;
+        }
+    }
+
+    if segments.len() < 2 {
+        return None;
+    }
+
+    segments.reverse();
+    Some(segments)
+}
+
+/// Resolve a chain of member accesses and return completions for the final type.
+fn resolve_chain_completions(
+    st: &SymbolTable,
+    file: &Path,
+    chain: &[ChainSegment],
+    scope: usize,
+) -> Vec<CompletionItem> {
+    if chain.is_empty() {
+        return vec![];
+    }
+
+    // Resolve the first segment to a type name.
+    let mut current_type = match &chain[0] {
+        ChainSegment::Ident(name) => {
+            // Look up the variable's type.
+            let visible = st.visible_declarations(file, scope);
+            let mut found_type = None;
+            for decl in &visible {
+                if decl.name == *name {
+                    if let Some(tt) = decl.type_text() {
+                        found_type = Some(tt.to_string());
+                        break;
+                    }
+                    // If it's a contract/interface, the "type" is its name.
+                    if matches!(
+                        decl.kind(),
+                        DeclKind::Contract | DeclKind::Interface | DeclKind::Library
+                    ) {
+                        found_type = Some(name.clone());
+                        break;
+                    }
+                }
+            }
+            match found_type {
+                Some(t) => t,
+                None => return vec![],
+            }
+        }
+        ChainSegment::Call(name) => {
+            // Function call as first segment (rare but handle it).
+            match resolve_call_return_type(st, file, name, scope) {
+                Some(t) => t,
+                None => return vec![],
+            }
+        }
+    };
+
+    // Walk the rest of the chain, resolving each call/member access.
+    for segment in &chain[1..] {
+        match segment {
+            ChainSegment::Call(method_name) => {
+                // Find the method on current_type and get its return type.
+                let clean_type = current_type
+                    .replace(" memory", "")
+                    .replace(" storage", "")
+                    .replace(" calldata", "");
+                match resolve_method_return_type(st, file, &clean_type, method_name) {
+                    Some(ret) => current_type = ret,
+                    None => return vec![],
+                }
+            }
+            ChainSegment::Ident(field_name) => {
+                // Find the field on current_type and get its type.
+                let clean_type = current_type
+                    .replace(" memory", "")
+                    .replace(" storage", "")
+                    .replace(" calldata", "");
+                let members = st.all_members_of(&clean_type, file);
+                match members.iter().find(|m| m.name == *field_name) {
+                    Some(m) => current_type = m.type_text.clone(),
+                    None => return vec![],
+                }
+            }
+        }
+    }
+
+    // Provide completions for the resolved type.
+    let clean_type = current_type
+        .replace(" memory", "")
+        .replace(" storage", "")
+        .replace(" calldata", "");
+
+    // Try built-in type members.
+    if let Some(mut items) = builtin_type_members(&clean_type) {
+        append_using_for(st, file, &clean_type, &mut items);
+        return items;
+    }
+
+    // Try user-defined type members.
+    let members = st.all_members_of(&clean_type, file);
+    if !members.is_empty() {
+        let mut items: Vec<CompletionItem> = members.iter().map(member_to_completion).collect();
+        append_using_for(st, file, &clean_type, &mut items);
+        return items;
+    }
+
+    vec![]
+}
+
+/// Look up a function by name in visible declarations and return its return type.
+fn resolve_call_return_type(
+    st: &SymbolTable,
+    file: &Path,
+    name: &str,
+    scope: usize,
+) -> Option<String> {
+    let visible = st.visible_declarations(file, scope);
+    for decl in &visible {
+        if decl.name == name && decl.kind() == DeclKind::Function {
+            let ret = decl.return_parameters();
+            if ret.len() == 1 {
+                return Some(ret[0].1.clone());
+            }
+        }
+    }
+    None
+}
+
+/// Look up a method by name on a type and return its return type.
+fn resolve_method_return_type(
+    st: &SymbolTable,
+    file: &Path,
+    type_name: &str,
+    method_name: &str,
+) -> Option<String> {
+    // First check if type_name is a type declaration with this method.
+    if let Some(decl_id) = st.find_type_decl(file, type_name) {
+        if st.get_declaration(&decl_id).is_some() {
+            // Find the scope of this type.
+            let fi = st.files.get(&decl_id.file)?;
+            for scope in &fi.scopes {
+                if scope.owner == Some(decl_id) {
+                    if let Some(func_id) = scope.get_decl(method_name) {
+                        if let Some(func_decl) = fi.declarations.get(func_id) {
+                            let ret = func_decl.return_parameters();
+                            if ret.len() == 1 {
+                                return Some(ret[0].1.clone());
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    // Fall back to checking all_members_of and finding a function.
+    let members = st.all_members_of(type_name, file);
+    for member in &members {
+        if member.name == method_name && member.kind == DeclKind::Function {
+            // Look up the full declaration for return type.
+            if let Some(decl_id) = &member.decl_id {
+                if let Some(decl) = st.get_declaration(decl_id) {
+                    let ret = decl.return_parameters();
+                    if ret.len() == 1 {
+                        return Some(ret[0].1.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    None
 }
 
 /// Extract the element type from an array type string.
