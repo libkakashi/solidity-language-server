@@ -50,12 +50,24 @@ pub fn handle_completion(
         fallback_tree.as_ref()
     };
 
-    // Suppress completion inside comments and string literals.
-    if tree.is_some_and(|t| is_in_comment_or_string(t, abs_byte)) {
-        return Some(CompletionResponse::List(CompletionList {
-            is_incomplete: false,
-            items: vec![],
-        }));
+    // Suppress completion inside comments and string literals — except NatSpec.
+    if let Some(t) = tree {
+        match classify_comment_context(t, source, abs_byte) {
+            CommentContext::NatSpec => {
+                let items = get_natspec_completions(t, source, abs_byte, line, col_byte);
+                return Some(CompletionResponse::List(CompletionList {
+                    is_incomplete: false,
+                    items,
+                }));
+            }
+            CommentContext::Other => {
+                return Some(CompletionResponse::List(CompletionList {
+                    is_incomplete: false,
+                    items: vec![],
+                }));
+            }
+            CommentContext::None => {}
+        }
     }
 
     // Check for import completion context.
@@ -90,34 +102,233 @@ pub fn handle_completion(
 // Comment / string detection
 // ---------------------------------------------------------------------------
 
-/// Check if a byte offset falls inside a comment or string literal using
-/// a pre-parsed tree-sitter tree.
-fn is_in_comment_or_string(tree: &tree_sitter::Tree, byte_offset: usize) -> bool {
+enum CommentContext {
+    /// Not inside a comment or string.
+    None,
+    /// Inside a NatSpec comment (`///` or `/** */`).
+    NatSpec,
+    /// Inside a regular comment or string literal.
+    Other,
+}
+
+/// Classify whether the cursor is inside a comment, and if so, whether it's
+/// a NatSpec comment that should receive tag completions.
+fn classify_comment_context(
+    tree: &tree_sitter::Tree,
+    source: &str,
+    byte_offset: usize,
+) -> CommentContext {
     if byte_offset == 0 {
-        return false;
+        return CommentContext::None;
     }
-    // Check the position just before the cursor. Tree-sitter uses half-open
-    // ranges [start, end), so checking at `byte_offset` exactly can miss the
-    // end boundary of comment/string nodes.
     let check = byte_offset - 1;
     let node = match tree.root_node().descendant_for_byte_range(check, check) {
         Some(n) => n,
-        None => return false,
+        None => return CommentContext::None,
     };
-    // Walk up to check if we're inside a comment or string node.
     let mut current = Some(node);
     while let Some(n) = current {
         match n.kind() {
-            "comment"
-            | "string"
-            | "string_literal"
-            | "hex_string_literal"
-            | "unicode_string_literal" => return true,
+            "comment" => {
+                let text = &source[n.start_byte()..n.end_byte()];
+                if text.starts_with("///") || text.starts_with("/**") {
+                    return CommentContext::NatSpec;
+                }
+                return CommentContext::Other;
+            }
+            "string" | "string_literal" | "hex_string_literal" | "unicode_string_literal" => {
+                return CommentContext::Other;
+            }
             _ => {}
         }
         current = n.parent();
     }
-    false
+    CommentContext::None
+}
+
+// ---------------------------------------------------------------------------
+// NatSpec completion
+// ---------------------------------------------------------------------------
+
+/// Provide NatSpec tag completions inside `///` or `/** */` comments.
+fn get_natspec_completions(
+    tree: &tree_sitter::Tree,
+    source: &str,
+    byte_offset: usize,
+    line: &str,
+    col_byte: u32,
+) -> Vec<CompletionItem> {
+    let col = col_byte as usize;
+    let before_cursor = &line[..col.min(line.len())];
+
+    // Check if the user just typed '@' or is typing a tag name.
+    let tag_prefix = if let Some(at_pos) = before_cursor.rfind('@') {
+        // Only complete if there's no space between '@' and cursor (still typing the tag).
+        let after_at = &before_cursor[at_pos + 1..];
+        if after_at.chars().all(|c| c.is_ascii_alphanumeric()) {
+            Some(after_at)
+        } else {
+            // Cursor is past the tag — check if we should complete param names.
+            return get_natspec_param_name_completions(tree, source, byte_offset, before_cursor);
+        }
+    } else {
+        // No '@' on this line — no NatSpec tag completion.
+        return vec![];
+    };
+
+    let prefix = tag_prefix.unwrap_or("");
+
+    // Collect parameter names for @param tag detail.
+    let param_names = get_next_function_params(tree, source, byte_offset);
+
+    let mut items = Vec::new();
+    let tags: &[(&str, &str, &str)] = &[
+        (
+            "@notice",
+            "notice",
+            "Explains to an end user what this does",
+        ),
+        ("@dev", "dev", "Explains to a developer extra details"),
+        ("@param", "param", "Documents a parameter"),
+        ("@return", "return", "Documents the return value(s)"),
+        (
+            "@inheritdoc",
+            "inheritdoc",
+            "Inherits documentation from a base contract",
+        ),
+        ("@custom", "custom", "Custom tag (application-defined)"),
+        (
+            "@title",
+            "title",
+            "A title for the contract/interface/library",
+        ),
+        ("@author", "author", "The author of the contract"),
+    ];
+
+    for &(tag, tag_name, description) in tags {
+        if !tag_name.starts_with(prefix) {
+            continue;
+        }
+        let mut detail = description.to_string();
+        if tag == "@param" && !param_names.is_empty() {
+            detail = format!("{detail} — params: {}", param_names.join(", "));
+        }
+        items.push(CompletionItem {
+            label: tag.to_string(),
+            kind: Some(CompletionItemKind::KEYWORD),
+            detail: Some(detail),
+            ..Default::default()
+        });
+    }
+
+    items
+}
+
+/// After `@param `, suggest parameter names from the next function declaration.
+fn get_natspec_param_name_completions(
+    tree: &tree_sitter::Tree,
+    source: &str,
+    byte_offset: usize,
+    before_cursor: &str,
+) -> Vec<CompletionItem> {
+    // Check if line contains `@param` followed by a partial identifier at cursor.
+    let trimmed = before_cursor.trim_start_matches(|c: char| c == '/' || c == '*' || c == ' ');
+    if !trimmed.starts_with("@param") {
+        return vec![];
+    }
+    let after_param = &trimmed["@param".len()..];
+    // Must have at least one space after @param.
+    if !after_param.starts_with(' ') {
+        return vec![];
+    }
+    let name_prefix = after_param.trim_start();
+
+    let param_names = get_next_function_params(tree, source, byte_offset);
+    param_names
+        .into_iter()
+        .filter(|name| name.starts_with(name_prefix))
+        .map(|name| CompletionItem {
+            label: name,
+            kind: Some(CompletionItemKind::VARIABLE),
+            detail: Some("parameter".to_string()),
+            ..Default::default()
+        })
+        .collect()
+}
+
+/// Find the next function/event/error declaration after the current comment
+/// and extract its parameter names.
+fn get_next_function_params(
+    tree: &tree_sitter::Tree,
+    source: &str,
+    byte_offset: usize,
+) -> Vec<String> {
+    // Find the comment node we're inside.
+    if byte_offset == 0 {
+        return vec![];
+    }
+    let comment_node = match tree
+        .root_node()
+        .descendant_for_byte_range(byte_offset - 1, byte_offset - 1)
+    {
+        Some(n) => {
+            let mut node = n;
+            while node.kind() != "comment" {
+                match node.parent() {
+                    Some(p) => node = p,
+                    None => return vec![],
+                }
+            }
+            node
+        }
+        None => return vec![],
+    };
+
+    // Walk forward from the comment to find the next non-comment sibling.
+    let mut next = comment_node.next_named_sibling();
+    while let Some(n) = next {
+        if n.kind() == "comment" {
+            next = n.next_named_sibling();
+            continue;
+        }
+        // Found a non-comment node. Extract parameter names.
+        return extract_param_names_from_node(n, source);
+    }
+    vec![]
+}
+
+/// Extract parameter names from a function/event/error/modifier declaration node.
+fn extract_param_names_from_node(node: tree_sitter::Node, source: &str) -> Vec<String> {
+    let mut params = Vec::new();
+    let mut cursor = node.walk();
+
+    // Look for parameter nodes within the declaration.
+    for child in node.children(&mut cursor) {
+        if child.kind() == "parameter" {
+            // Parameter has a "name" field.
+            if let Some(name_node) = child.child_by_field_name("name") {
+                let name = &source[name_node.start_byte()..name_node.end_byte()];
+                if !name.is_empty() {
+                    params.push(name.to_string());
+                }
+            }
+        }
+        // Also check inside parameter_list nodes.
+        if child.kind().contains("parameter") && child.kind() != "parameter" {
+            let mut inner = child.walk();
+            for p in child.children(&mut inner) {
+                if p.kind() == "parameter" {
+                    if let Some(name_node) = p.child_by_field_name("name") {
+                        let name = &source[name_node.start_byte()..name_node.end_byte()];
+                        if !name.is_empty() {
+                            params.push(name.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    params
 }
 
 // ---------------------------------------------------------------------------

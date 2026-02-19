@@ -1642,3 +1642,177 @@ contract Main {
         "user. should include 'active' from Types.UserInfo, got: {labels:?}"
     );
 }
+
+// ========== NATSPEC COMPLETION TESTS ==========
+
+/// Helper that parses with tree-sitter and passes the tree to handle_completion.
+fn completion_labels_with_tree(
+    st: &SymbolTable,
+    path: &PathBuf,
+    source: &str,
+    pos: Position,
+    trigger: Option<&str>,
+) -> Vec<String> {
+    let mut parser = TsParser::new();
+    let tree = parser.parse(source, None).unwrap();
+    match handle_completion(
+        st,
+        path,
+        source,
+        pos,
+        trigger,
+        &LineIndex::new(source),
+        Some(&tree),
+    ) {
+        Some(CompletionResponse::List(list)) => {
+            list.items.iter().map(|i| i.label.clone()).collect()
+        }
+        _ => vec![],
+    }
+}
+
+#[test]
+fn natspec_completion_at_sign_in_triple_slash() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Foo {
+    /// @
+    function bar(uint256 x, address to) public {}
+}
+"#;
+    let (st, path) = setup(source);
+
+    // Position right after `/// @`
+    let at_pos = source.find("/// @").unwrap() + "/// @".len();
+    let line = source[..at_pos].matches('\n').count() as u32;
+    let col = (at_pos - source[..at_pos].rfind('\n').unwrap() - 1) as u32;
+
+    let labels = completion_labels_with_tree(&st, &path, source, Position::new(line, col), None);
+
+    assert!(
+        labels.contains(&"@notice".to_string()),
+        "NatSpec should include @notice, got: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"@dev".to_string()),
+        "NatSpec should include @dev"
+    );
+    assert!(
+        labels.contains(&"@param".to_string()),
+        "NatSpec should include @param"
+    );
+    assert!(
+        labels.contains(&"@return".to_string()),
+        "NatSpec should include @return"
+    );
+    assert!(
+        labels.contains(&"@inheritdoc".to_string()),
+        "NatSpec should include @inheritdoc"
+    );
+}
+
+#[test]
+fn natspec_completion_partial_tag() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Foo {
+    /// @par
+    function bar(uint256 x) public {}
+}
+"#;
+    let (st, path) = setup(source);
+
+    let pos = source.find("/// @par").unwrap() + "/// @par".len();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let labels = completion_labels_with_tree(&st, &path, source, Position::new(line, col), None);
+
+    assert!(
+        labels.contains(&"@param".to_string()),
+        "Partial @par should include @param, got: {labels:?}"
+    );
+    // @notice should NOT match @par prefix.
+    assert!(
+        !labels.contains(&"@notice".to_string()),
+        "Partial @par should not include @notice"
+    );
+}
+
+#[test]
+fn natspec_param_name_completion() {
+    // Use a regular string so we can have a trailing space after @param.
+    let source = "// SPDX-License-Identifier: MIT\npragma solidity ^0.8.29;\n\ncontract Foo {\n    /// @param \n    function transfer(address to, uint256 amount) public {}\n}\n";
+    let (st, path) = setup(source);
+
+    let pos = source.find("@param ").unwrap() + "@param ".len();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let labels = completion_labels_with_tree(&st, &path, source, Position::new(line, col), None);
+
+    assert!(
+        labels.contains(&"to".to_string()),
+        "Should suggest param name 'to', got: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"amount".to_string()),
+        "Should suggest param name 'amount', got: {labels:?}"
+    );
+}
+
+#[test]
+fn natspec_no_completion_in_regular_comment() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Foo {
+    // regular comment @
+    function bar() public {}
+}
+"#;
+    let (st, path) = setup(source);
+
+    let pos = source.find("comment @").unwrap() + "comment @".len();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let labels = completion_labels_with_tree(&st, &path, source, Position::new(line, col), None);
+
+    assert!(
+        labels.is_empty(),
+        "Regular comments should not get NatSpec completions, got: {labels:?}"
+    );
+}
+
+#[test]
+fn natspec_completion_in_block_comment() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Foo {
+    /**
+     * @
+     */
+    function bar(uint256 x) public {}
+}
+"#;
+    let (st, path) = setup(source);
+
+    let pos = source.find("* @\n").unwrap() + "* @".len();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let labels = completion_labels_with_tree(&st, &path, source, Position::new(line, col), None);
+
+    assert!(
+        labels.contains(&"@notice".to_string()),
+        "Block NatSpec should include @notice, got: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"@param".to_string()),
+        "Block NatSpec should include @param"
+    );
+}
