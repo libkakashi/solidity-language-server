@@ -3,7 +3,7 @@ use std::path::Path;
 use tower_lsp::lsp_types::{Hover, HoverContents, MarkupContent, MarkupKind, Position};
 
 use crate::completion::extract_type_call_before_dot;
-use crate::symbol_table::{DeclKind, SymbolTable};
+use crate::symbol_table::{DeclKind, Declaration, SymbolTable};
 use crate::utils::LineIndex;
 
 /// Produce hover information for the symbol at the given position.
@@ -31,6 +31,16 @@ pub fn hover_info(
         if decl.is_constant() || decl.is_immutable() {
             if let Some(value) = evaluate_constant_initializer(decl, source) {
                 parts.push(format!("Value: `{value}`"));
+            }
+        }
+
+        // Show estimated gas for functions.
+        if matches!(
+            decl.kind(),
+            DeclKind::Function | DeclKind::Constructor | DeclKind::FallbackReceive
+        ) {
+            if let Some(gas_info) = estimate_function_gas(st, file, source, decl) {
+                parts.push(gas_info);
             }
         }
 
@@ -803,4 +813,228 @@ pub fn format_natspec(text: &str) -> String {
     }
 
     lines.join("\n")
+}
+
+// ---------------------------------------------------------------------------
+// Gas estimation
+// ---------------------------------------------------------------------------
+
+/// Gas costs for common EVM operations (approximate, cold-access values).
+const GAS_BASE_TX: u64 = 21_000;
+const GAS_SSTORE: u64 = 20_000;
+const GAS_SLOAD: u64 = 2_100;
+const GAS_EXTERNAL_CALL: u64 = 2_600;
+const GAS_LOG_BASE: u64 = 375;
+const GAS_LOG_TOPIC: u64 = 375;
+const GAS_TRANSFER: u64 = 2_300;
+
+/// Estimate gas for a function based on static analysis of its body.
+fn estimate_function_gas(
+    st: &SymbolTable,
+    file: &Path,
+    source: &str,
+    decl: &Declaration,
+) -> Option<String> {
+    let (start, end) = decl.full_range;
+    if end > source.len() {
+        return None;
+    }
+    let func_text = &source[start..end];
+
+    // Find function body (between first { and last }).
+    let body_start = func_text.find('{')?;
+    let body = &func_text[body_start + 1..];
+    let body_end = body.rfind('}')?;
+    let body = body[..body_end].trim();
+    if body.is_empty() {
+        return None;
+    }
+
+    // Collect state variable names from the contract scope.
+    // For functions, decl.scope IS the contract scope (where the function is registered).
+    let fi = st.get_file_index(file)?;
+    let contract_scope = fi.scopes.get(decl.scope)?;
+    let state_vars: Vec<&str> = contract_scope
+        .declarations
+        .iter()
+        .filter_map(|(name, did)| {
+            let d = fi.declarations.get(did)?;
+            if d.kind() == DeclKind::StateVariable {
+                Some(name.as_str())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let mut sstore_count: u64 = 0;
+    let mut sload_count: u64 = 0;
+    let mut emit_count: u64 = 0;
+    let mut external_call_count: u64 = 0;
+    let mut transfer_count: u64 = 0;
+
+    // Scan for state variable writes (assignments).
+    // Patterns: `varName =`, `varName +=`, `varName -=`, `varName *=`, `varName /=`
+    // Also `varName[...] =` for mapping/array writes.
+    for var in &state_vars {
+        let mut search_from = 0;
+        while let Some(pos) = body[search_from..].find(var) {
+            let abs_pos = search_from + pos;
+            let before_ok = abs_pos == 0
+                || !body.as_bytes()[abs_pos - 1].is_ascii_alphanumeric()
+                    && body.as_bytes()[abs_pos - 1] != b'_';
+            let after_pos = abs_pos + var.len();
+            let after_ok = after_pos >= body.len()
+                || !body.as_bytes()[after_pos].is_ascii_alphanumeric()
+                    && body.as_bytes()[after_pos] != b'_';
+
+            if before_ok && after_ok && after_pos < body.len() {
+                let rest = body[after_pos..].trim_start();
+                // Skip past brackets for mapping/array access.
+                let rest = if rest.starts_with('[') {
+                    skip_brackets(rest)
+                } else {
+                    rest
+                };
+                if rest.starts_with('=') && !rest.starts_with("==")
+                    || rest.starts_with("+=")
+                    || rest.starts_with("-=")
+                    || rest.starts_with("*=")
+                    || rest.starts_with("/=")
+                {
+                    sstore_count += 1;
+                } else {
+                    sload_count += 1;
+                }
+            }
+
+            search_from = abs_pos + var.len().max(1);
+        }
+    }
+
+    // Count emit statements.
+    {
+        let mut search_from = 0;
+        while let Some(pos) = body[search_from..].find("emit ") {
+            let abs_pos = search_from + pos;
+            let before_ok = abs_pos == 0
+                || !body.as_bytes()[abs_pos - 1].is_ascii_alphanumeric()
+                    && body.as_bytes()[abs_pos - 1] != b'_';
+            if before_ok {
+                emit_count += 1;
+            }
+            search_from = abs_pos + 5;
+        }
+    }
+
+    // Count external calls (.call(, .delegatecall(, .staticcall(, .send().
+    for pattern in &[".call(", ".delegatecall(", ".staticcall(", ".send("] {
+        let mut search_from = 0;
+        while let Some(pos) = body[search_from..].find(pattern) {
+            external_call_count += 1;
+            search_from = search_from + pos + pattern.len();
+        }
+    }
+
+    // Count .transfer( separately (fixed 2300 gas stipend).
+    {
+        let mut search_from = 0;
+        while let Some(pos) = body[search_from..].find(".transfer(") {
+            transfer_count += 1;
+            search_from = search_from + pos + 10;
+        }
+    }
+
+    let total = GAS_BASE_TX
+        + sstore_count * GAS_SSTORE
+        + sload_count * GAS_SLOAD
+        + emit_count * (GAS_LOG_BASE + GAS_LOG_TOPIC)
+        + external_call_count * GAS_EXTERNAL_CALL
+        + transfer_count * GAS_TRANSFER;
+
+    // Only show if there's something beyond the base tx cost.
+    if sstore_count + sload_count + emit_count + external_call_count + transfer_count == 0 {
+        return Some(format!(
+            "**Estimated Gas:** ~{} (base transaction)",
+            format_gas(GAS_BASE_TX)
+        ));
+    }
+
+    let mut breakdown = Vec::new();
+    breakdown.push(format!("base tx: {}", format_gas(GAS_BASE_TX)));
+    if sstore_count > 0 {
+        breakdown.push(format!(
+            "{}x SSTORE: {}",
+            sstore_count,
+            format_gas(sstore_count * GAS_SSTORE)
+        ));
+    }
+    if sload_count > 0 {
+        breakdown.push(format!(
+            "{}x SLOAD: {}",
+            sload_count,
+            format_gas(sload_count * GAS_SLOAD)
+        ));
+    }
+    if emit_count > 0 {
+        breakdown.push(format!(
+            "{}x emit: {}",
+            emit_count,
+            format_gas(emit_count * (GAS_LOG_BASE + GAS_LOG_TOPIC))
+        ));
+    }
+    if external_call_count > 0 {
+        breakdown.push(format!(
+            "{}x external call: {}",
+            external_call_count,
+            format_gas(external_call_count * GAS_EXTERNAL_CALL)
+        ));
+    }
+    if transfer_count > 0 {
+        breakdown.push(format!(
+            "{}x transfer: {}",
+            transfer_count,
+            format_gas(transfer_count * GAS_TRANSFER)
+        ));
+    }
+
+    Some(format!(
+        "**Estimated Gas:** ~{} ({})",
+        format_gas(total),
+        breakdown.join(" + ")
+    ))
+}
+
+/// Skip past balanced brackets `[...]` and return the remaining text.
+fn skip_brackets(s: &str) -> &str {
+    if !s.starts_with('[') {
+        return s;
+    }
+    let mut depth = 0;
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '[' => depth += 1,
+            ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return s[i + 1..].trim_start();
+                }
+            }
+            _ => {}
+        }
+    }
+    s
+}
+
+/// Format a gas number with thousands separators.
+fn format_gas(gas: u64) -> String {
+    let s = gas.to_string();
+    let mut result = String::new();
+    for (i, ch) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            result.push(',');
+        }
+        result.push(ch);
+    }
+    result.chars().rev().collect()
 }

@@ -2758,3 +2758,193 @@ contract Token {
         "Non-constant variable should NOT show computed value, got: {text}"
     );
 }
+
+// ===========================================================================
+// Gas estimation tests
+// ===========================================================================
+
+fn pos_of(source: &str, needle: &str) -> Position {
+    let pos = source.find(needle).expect("needle not found in source");
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').map(|i| i + 1).unwrap_or(0)) as u32;
+    Position::new(line, col)
+}
+
+#[test]
+fn gas_estimation_sstore() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity 0.8.29;
+
+contract Store {
+    uint256 public value;
+
+    function setValue(uint256 newValue) public {
+        value = newValue;
+    }
+}
+"#;
+    let (st, path) = setup(source);
+    let text = hover_text(source, &st, &path, pos_of(source, "setValue")).unwrap();
+    assert!(
+        text.contains("Estimated Gas"),
+        "Function with SSTORE should show gas estimate, got: {text}"
+    );
+    assert!(
+        text.contains("SSTORE"),
+        "Should mention SSTORE in breakdown, got: {text}"
+    );
+}
+
+#[test]
+fn gas_estimation_sload() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity 0.8.29;
+
+contract Reader {
+    uint256 public value;
+
+    function getValue() public view returns (uint256) {
+        return value;
+    }
+}
+"#;
+    let (st, path) = setup(source);
+    let text = hover_text(source, &st, &path, pos_of(source, "getValue")).unwrap();
+    assert!(
+        text.contains("Estimated Gas"),
+        "Function with SLOAD should show gas estimate, got: {text}"
+    );
+    assert!(
+        text.contains("SLOAD"),
+        "Should mention SLOAD in breakdown, got: {text}"
+    );
+}
+
+#[test]
+fn gas_estimation_emit() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity 0.8.29;
+
+contract Emitter {
+    event Transfer(address indexed from, address indexed to, uint256 value);
+
+    function doTransfer() public {
+        emit Transfer(msg.sender, address(0), 100);
+    }
+}
+"#;
+    let (st, path) = setup(source);
+    let text = hover_text(source, &st, &path, pos_of(source, "doTransfer")).unwrap();
+    assert!(
+        text.contains("Estimated Gas"),
+        "Function with emit should show gas estimate, got: {text}"
+    );
+    assert!(
+        text.contains("emit"),
+        "Should mention emit in breakdown, got: {text}"
+    );
+}
+
+#[test]
+fn gas_estimation_external_call() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity 0.8.29;
+
+contract Caller {
+    function doCall(address target) public {
+        (bool success, ) = target.call("");
+        require(success);
+    }
+}
+"#;
+    let (st, path) = setup(source);
+    let text = hover_text(source, &st, &path, pos_of(source, "doCall")).unwrap();
+    assert!(
+        text.contains("Estimated Gas"),
+        "Function with external call should show gas estimate, got: {text}"
+    );
+    assert!(
+        text.contains("external call"),
+        "Should mention external call in breakdown, got: {text}"
+    );
+}
+
+#[test]
+fn gas_estimation_transfer() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity 0.8.29;
+
+contract Payer {
+    function pay(address payable recipient) public payable {
+        recipient.transfer(msg.value);
+    }
+}
+"#;
+    let (st, path) = setup(source);
+    let text = hover_text(source, &st, &path, pos_of(source, "pay")).unwrap();
+    assert!(
+        text.contains("Estimated Gas"),
+        "Function with transfer should show gas estimate, got: {text}"
+    );
+    assert!(
+        text.contains("transfer"),
+        "Should mention transfer in breakdown, got: {text}"
+    );
+}
+
+#[test]
+fn gas_estimation_pure_function_base_only() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity 0.8.29;
+
+contract Math {
+    function add(uint256 a, uint256 b) public pure returns (uint256) {
+        return a + b;
+    }
+}
+"#;
+    let (st, path) = setup(source);
+    let text = hover_text(source, &st, &path, pos_of(source, "add")).unwrap();
+    assert!(
+        text.contains("Estimated Gas"),
+        "Pure function should still show base gas, got: {text}"
+    );
+    assert!(
+        text.contains("base transaction"),
+        "Pure function should show base transaction only, got: {text}"
+    );
+}
+
+#[test]
+fn gas_estimation_complex_function() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity 0.8.29;
+
+contract Vault {
+    mapping(address => uint256) public balances;
+    uint256 public totalDeposits;
+
+    event Deposit(address indexed user, uint256 amount);
+
+    function deposit() public payable {
+        balances[msg.sender] += msg.value;
+        totalDeposits += msg.value;
+        emit Deposit(msg.sender, msg.value);
+    }
+}
+"#;
+    let (st, path) = setup(source);
+    let text = hover_text(source, &st, &path, pos_of(source, "deposit")).unwrap();
+    assert!(
+        text.contains("Estimated Gas"),
+        "Complex function should show gas estimate, got: {text}"
+    );
+    assert!(
+        text.contains("SSTORE"),
+        "Should detect SSTORE operations, got: {text}"
+    );
+    assert!(
+        text.contains("emit"),
+        "Should detect emit operations, got: {text}"
+    );
+}
