@@ -1108,3 +1108,201 @@ contract A {
         matched[0].title
     );
 }
+
+// ========== AUTO-IMPORT TESTS ==========
+
+/// Build a synthetic solar diagnostic for undeclared identifiers.
+fn make_solar_diag(range: Range, message: &str) -> Diagnostic {
+    Diagnostic {
+        range,
+        severity: Some(DiagnosticSeverity::ERROR),
+        code: None,
+        source: Some("solar".to_string()),
+        message: message.to_string(),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn auto_import_suggests_import_for_undeclared_identifier() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut parser = TsParser::new();
+    let resolver = ImportResolver::with_root(tmp.path().to_path_buf());
+
+    // Target file that exports IERC20
+    let ierc20_source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+interface IERC20 {
+    function transfer(address to, uint256 amount) external returns (bool);
+}
+"#;
+    let ierc20_path = tmp.path().join("IERC20.sol");
+    std::fs::write(&ierc20_path, ierc20_source).unwrap();
+
+    // Main file that uses IERC20 without importing it
+    let main_source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Vault {
+    IERC20 public token;
+}
+"#;
+    let main_path = tmp.path().join("Vault.sol");
+    std::fs::write(&main_path, main_source).unwrap();
+
+    let mut st = SymbolTable::new(resolver);
+    st.index_file(&ierc20_path, ierc20_source, &mut parser);
+    st.resolve_file_references(&ierc20_path, &mut parser);
+    st.index_file(&main_path, main_source, &mut parser);
+    st.resolve_file_references(&main_path, &mut parser);
+
+    let li = LineIndex::new(main_source);
+    let uri = Url::from_file_path(&main_path).unwrap();
+
+    // Simulate a solar diagnostic on "IERC20" (line 4, col 4..10)
+    let ierc20_pos = main_source.find("IERC20 public").unwrap();
+    let start = li.byte_offset_to_lsp_position(main_source, ierc20_pos);
+    let end = li.byte_offset_to_lsp_position(main_source, ierc20_pos + "IERC20".len());
+    let diag = make_solar_diag(Range { start, end }, "undeclared identifier `IERC20`");
+
+    let range = Range {
+        start: Position::new(0, 0),
+        end: Position::new(u32::MAX, u32::MAX),
+    };
+    let actions = code_actions(&st, &main_path, main_source, range, &[diag], &li, &uri);
+
+    let titles: Vec<String> = actions
+        .iter()
+        .map(|a| match a {
+            CodeActionOrCommand::CodeAction(ca) => ca.title.clone(),
+            CodeActionOrCommand::Command(c) => c.title.clone(),
+        })
+        .collect();
+
+    assert!(
+        titles
+            .iter()
+            .any(|t| t.contains("Import") && t.contains("IERC20")),
+        "Should suggest importing IERC20, got: {titles:?}"
+    );
+}
+
+#[test]
+fn auto_import_inserts_after_existing_imports() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut parser = TsParser::new();
+    let resolver = ImportResolver::with_root(tmp.path().to_path_buf());
+
+    let lib_source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+library SafeMath {
+    function add(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a + b;
+    }
+}
+"#;
+    let lib_path = tmp.path().join("SafeMath.sol");
+    std::fs::write(&lib_path, lib_source).unwrap();
+
+    let main_source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+import {Something} from "./Something.sol";
+
+contract Foo {
+    SafeMath x;
+}
+"#;
+    let main_path = tmp.path().join("Foo.sol");
+    std::fs::write(&main_path, main_source).unwrap();
+
+    let mut st = SymbolTable::new(resolver);
+    st.index_file(&lib_path, lib_source, &mut parser);
+    st.resolve_file_references(&lib_path, &mut parser);
+    st.index_file(&main_path, main_source, &mut parser);
+    st.resolve_file_references(&main_path, &mut parser);
+
+    let li = LineIndex::new(main_source);
+    let uri = Url::from_file_path(&main_path).unwrap();
+
+    let sm_pos = main_source.find("SafeMath x").unwrap();
+    let start = li.byte_offset_to_lsp_position(main_source, sm_pos);
+    let end = li.byte_offset_to_lsp_position(main_source, sm_pos + "SafeMath".len());
+    let diag = make_solar_diag(Range { start, end }, "undeclared identifier `SafeMath`");
+
+    let range = Range {
+        start: Position::new(0, 0),
+        end: Position::new(u32::MAX, u32::MAX),
+    };
+    let actions = code_actions(&st, &main_path, main_source, range, &[diag], &li, &uri);
+
+    // Find the auto-import action
+    let import_action = actions.iter().find_map(|a| match a {
+        CodeActionOrCommand::CodeAction(ca) if ca.title.contains("Import") => Some(ca),
+        _ => None,
+    });
+    assert!(import_action.is_some(), "Should have an import action");
+
+    let action = import_action.unwrap();
+    let edit = action.edit.as_ref().unwrap();
+    let changes = edit.changes.as_ref().unwrap();
+    let edits = changes.values().next().unwrap();
+    let text_edit = &edits[0];
+
+    // Should insert after the existing import line (line 3)
+    assert!(
+        text_edit.range.start.line >= 3,
+        "Import should be inserted after existing imports (line >= 3), got line {}",
+        text_edit.range.start.line
+    );
+    assert!(
+        text_edit.new_text.contains("SafeMath"),
+        "Import text should contain SafeMath, got: {}",
+        text_edit.new_text
+    );
+}
+
+#[test]
+fn auto_import_ignores_non_solar_diagnostics() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Foo {
+    uint256 x;
+}
+"#;
+    let (st, path) = setup(source);
+    let li = LineIndex::new(source);
+    let uri = Url::from_file_path(&path).unwrap();
+
+    // A non-solar diagnostic should not trigger auto-import.
+    let diag = make_diag(
+        "some-error",
+        Range {
+            start: Position::new(4, 4),
+            end: Position::new(4, 11),
+        },
+        "undeclared identifier `uint256`",
+    );
+
+    let range = Range {
+        start: Position::new(0, 0),
+        end: Position::new(u32::MAX, u32::MAX),
+    };
+    let actions = code_actions(&st, &path, source, range, &[diag], &li, &uri);
+
+    let import_actions: Vec<_> = actions
+        .iter()
+        .filter(|a| match a {
+            CodeActionOrCommand::CodeAction(ca) => ca.title.contains("Import"),
+            _ => false,
+        })
+        .collect();
+
+    assert!(
+        import_actions.is_empty(),
+        "Non-solar diagnostics should not trigger auto-import"
+    );
+}

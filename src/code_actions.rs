@@ -76,6 +76,17 @@ pub fn code_actions(
             _ => {}
         }
     }
+
+    // Check solar diagnostics for undeclared identifiers (auto-import).
+    for diag in diagnostics {
+        if diag.source.as_deref() != Some("solar") {
+            continue;
+        }
+        if let Some(a) = action_auto_import(st, file, source, diag, line_index, uri) {
+            actions.push(CodeActionOrCommand::CodeAction(a));
+        }
+    }
+
     actions
 }
 
@@ -458,6 +469,154 @@ fn action_use_custom_error(
     } else {
         None
     }
+}
+
+// ---------------------------------------------------------------------------
+// Quick fix: auto-import for undeclared identifiers
+// ---------------------------------------------------------------------------
+
+fn action_auto_import(
+    st: &SymbolTable,
+    file: &Path,
+    source: &str,
+    diag: &Diagnostic,
+    line_index: &LineIndex,
+    uri: &Url,
+) -> Option<CodeAction> {
+    // Match solar error messages about undeclared identifiers.
+    let msg = &diag.message;
+    if !msg.contains("undeclared identifier")
+        && !msg.contains("not found")
+        && !msg.contains("not declared")
+    {
+        return None;
+    }
+
+    // Extract the symbol name from the diagnostic range.
+    let start_byte = line_index.position_to_byte_offset(
+        source,
+        diag.range.start.line,
+        diag.range.start.character,
+    );
+    let end_byte =
+        line_index.position_to_byte_offset(source, diag.range.end.line, diag.range.end.character);
+    let symbol_name = source.get(start_byte..end_byte)?.trim();
+
+    if symbol_name.is_empty()
+        || !symbol_name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        return None;
+    }
+
+    let current_file_id = st.lookup_file_id(file)?;
+
+    // Search all indexed files for a top-level declaration with this name.
+    for (&file_id, fi) in &st.files {
+        if file_id == current_file_id {
+            continue;
+        }
+        // Check if this file exports the symbol.
+        if !fi.top_level_names().any(|n| n == symbol_name) {
+            continue;
+        }
+        let target_path = st.resolve_path(file_id);
+
+        // Compute relative import path.
+        let import_path = compute_relative_import(file, target_path)?;
+
+        // Find where to insert the import (after the last import or after pragma).
+        let insert_pos = find_import_insert_position(source);
+        let insert_lsp = line_index.byte_offset_to_lsp_position(source, insert_pos);
+
+        let new_text = format!("import {{{symbol_name}}} from \"{import_path}\";\n");
+
+        let mut changes = HashMap::new();
+        changes.insert(
+            uri.clone(),
+            vec![TextEdit {
+                range: Range {
+                    start: insert_lsp,
+                    end: insert_lsp,
+                },
+                new_text,
+            }],
+        );
+
+        return Some(CodeAction {
+            title: format!("Import `{symbol_name}` from \"{import_path}\""),
+            kind: Some(CodeActionKind::QUICKFIX),
+            diagnostics: Some(vec![diag.clone()]),
+            edit: Some(WorkspaceEdit {
+                changes: Some(changes),
+                ..Default::default()
+            }),
+            is_preferred: Some(false),
+            ..Default::default()
+        });
+    }
+
+    None
+}
+
+/// Compute a relative import path from `from_file` to `to_file`.
+fn compute_relative_import(from_file: &Path, to_file: &Path) -> Option<String> {
+    let from_dir = from_file.parent()?;
+    let to_dir = to_file.parent()?;
+    let to_name = to_file.file_name()?.to_str()?;
+
+    // Find common prefix.
+    let from_components: Vec<_> = from_dir.components().collect();
+    let to_components: Vec<_> = to_dir.components().collect();
+
+    let common = from_components
+        .iter()
+        .zip(to_components.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+
+    let ups = from_components.len() - common;
+    let mut parts = Vec::new();
+    if ups == 0 {
+        parts.push(".".to_string());
+    } else {
+        for _ in 0..ups {
+            parts.push("..".to_string());
+        }
+    }
+
+    for comp in &to_components[common..] {
+        parts.push(comp.as_os_str().to_str()?.to_string());
+    }
+
+    parts.push(to_name.to_string());
+    Some(parts.join("/"))
+}
+
+/// Find the byte position where a new import should be inserted.
+/// Prefers after the last existing import, or after the pragma line.
+fn find_import_insert_position(source: &str) -> usize {
+    let mut last_import_end = None;
+    let mut pragma_end = None;
+
+    for (i, line) in source.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("import ") || trimmed.starts_with("import{") {
+            // Find end of this line in bytes.
+            let line_start: usize = source.lines().take(i).map(|l| l.len() + 1).sum();
+            last_import_end = Some(line_start + line.len() + 1);
+        }
+        if trimmed.starts_with("pragma ") {
+            let line_start: usize = source.lines().take(i).map(|l| l.len() + 1).sum();
+            pragma_end = Some(line_start + line.len() + 1);
+        }
+    }
+
+    last_import_end
+        .or(pragma_end)
+        .unwrap_or(0)
+        .min(source.len())
 }
 
 // ---------------------------------------------------------------------------
