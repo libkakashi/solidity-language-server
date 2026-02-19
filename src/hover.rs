@@ -27,6 +27,13 @@ pub fn hover_info(
             parts.push(abi_info);
         }
 
+        // Show computed value for constants.
+        if decl.is_constant() || decl.is_immutable() {
+            if let Some(value) = evaluate_constant_initializer(decl, source) {
+                parts.push(format!("Value: `{value}`"));
+            }
+        }
+
         if let Some(natspec) = decl.natspec() {
             let formatted = format_natspec(natspec);
             if !formatted.is_empty() {
@@ -406,6 +413,215 @@ fn build_abi_info(
 /// Format bytes as hex string.
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+// ---------------------------------------------------------------------------
+// Constant expression evaluation
+// ---------------------------------------------------------------------------
+
+/// Extract and evaluate a constant's initializer expression.
+/// Returns the computed value as a string for simple expressions.
+fn evaluate_constant_initializer(
+    decl: &crate::symbol_table::Declaration,
+    source: &str,
+) -> Option<String> {
+    // Extract the initializer from the source text.
+    let decl_text = source.get(decl.full_range.0..decl.full_range.1)?;
+    let eq_pos = decl_text.find('=')?;
+    let after_eq = decl_text[eq_pos + 1..].trim();
+    // Strip trailing semicolon.
+    let expr = after_eq.strip_suffix(';').unwrap_or(after_eq).trim();
+
+    if expr.is_empty() {
+        return None;
+    }
+
+    // Try to evaluate as a simple constant expression.
+    eval_expr(expr)
+}
+
+/// Evaluate a simple constant expression.
+/// Supports: integer literals (decimal, hex), basic arithmetic (+, -, *, /, %, **),
+/// bitwise operations (&, |, ^, <<, >>), and parenthesized sub-expressions.
+fn eval_expr(expr: &str) -> Option<String> {
+    let expr = expr.trim();
+
+    // String literal — return as-is.
+    if (expr.starts_with('"') && expr.ends_with('"'))
+        || (expr.starts_with('\'') && expr.ends_with('\''))
+    {
+        return Some(expr.to_string());
+    }
+
+    // Boolean literal.
+    if expr == "true" || expr == "false" {
+        return Some(expr.to_string());
+    }
+
+    // Try numeric evaluation.
+    if let Some(val) = eval_numeric(expr) {
+        if val >= 0 {
+            return Some(format!("{val} (0x{val:x})"));
+        } else {
+            return Some(format!("{val}"));
+        }
+    }
+
+    // If it's a simple literal that doesn't need evaluation, return it.
+    if expr.starts_with("0x") || expr.starts_with("0X") {
+        // Already a hex literal — show as decimal too.
+        let hex_str = &expr[2..];
+        if let Ok(val) = i128::from_str_radix(hex_str, 16) {
+            return Some(format!("{val} ({expr})"));
+        }
+    }
+
+    None
+}
+
+/// Evaluate a numeric expression, returning the computed i128 value.
+fn eval_numeric(expr: &str) -> Option<i128> {
+    let expr = expr.trim();
+
+    // Parenthesized expression.
+    if expr.starts_with('(') && expr.ends_with(')') {
+        let inner = &expr[1..expr.len() - 1];
+        // Verify parens are balanced.
+        let mut depth = 0i32;
+        for ch in inner.chars() {
+            match ch {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth < 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if depth == 0 {
+            return eval_numeric(inner);
+        }
+    }
+
+    // Try binary operators (lowest precedence first).
+    // Order: |, ^, &, <<, >>, +, -, *, /, %, **
+    for &op in &["|", "^", "&", "<<", ">>", "+", "-", "*", "/", "%", "**"] {
+        if let Some((left, right)) = split_binary_op(expr, op) {
+            let lhs = eval_numeric(left)?;
+            let rhs = eval_numeric(right)?;
+            return match op {
+                "+" => Some(lhs.checked_add(rhs)?),
+                "-" => Some(lhs.checked_sub(rhs)?),
+                "*" => Some(lhs.checked_mul(rhs)?),
+                "/" => {
+                    if rhs == 0 {
+                        None
+                    } else {
+                        Some(lhs / rhs)
+                    }
+                }
+                "%" => {
+                    if rhs == 0 {
+                        None
+                    } else {
+                        Some(lhs % rhs)
+                    }
+                }
+                "**" => {
+                    if rhs < 0 || rhs > 128 {
+                        None
+                    } else {
+                        Some(lhs.checked_pow(rhs as u32)?)
+                    }
+                }
+                "<<" => Some(lhs.checked_shl(rhs as u32)?),
+                ">>" => Some(lhs.checked_shr(rhs as u32)?),
+                "|" => Some(lhs | rhs),
+                "^" => Some(lhs ^ rhs),
+                "&" => Some(lhs & rhs),
+                _ => None,
+            };
+        }
+    }
+
+    // Integer literal.
+    if expr.starts_with("0x") || expr.starts_with("0X") {
+        let hex_str = &expr[2..].replace('_', "");
+        return i128::from_str_radix(hex_str, 16).ok();
+    }
+
+    // Decimal literal (may contain underscores).
+    let clean = expr.replace('_', "");
+    clean.parse::<i128>().ok()
+}
+
+/// Split an expression on a binary operator at the top level (not inside parens).
+/// Returns (left, right) or None if the operator isn't found at the top level.
+fn split_binary_op<'a>(expr: &'a str, op: &str) -> Option<(&'a str, &'a str)> {
+    let bytes = expr.as_bytes();
+    let op_bytes = op.as_bytes();
+    let op_len = op_bytes.len();
+    let mut depth = 0i32;
+
+    // Scan from right to left for lowest-precedence operators,
+    // from left to right for highest-precedence (** is right-assoc).
+    let is_right_assoc = op == "**";
+    let indices: Box<dyn Iterator<Item = usize>> = if is_right_assoc {
+        Box::new(0..expr.len())
+    } else {
+        Box::new((0..expr.len()).rev())
+    };
+
+    for i in indices {
+        match bytes[i] {
+            b'(' => {
+                if is_right_assoc {
+                    depth += 1;
+                } else {
+                    depth -= 1;
+                }
+            }
+            b')' => {
+                if is_right_assoc {
+                    depth -= 1;
+                } else {
+                    depth += 1;
+                }
+            }
+            _ => {}
+        }
+        if depth != 0 {
+            continue;
+        }
+        if i + op_len <= expr.len() && &bytes[i..i + op_len] == op_bytes {
+            // Avoid matching `-` in a negative number at position 0.
+            if op == "-" && i == 0 {
+                continue;
+            }
+            // Avoid matching `*` when it's part of `**`.
+            if op == "*" && i + 1 < expr.len() && bytes[i + 1] == b'*' {
+                continue;
+            }
+            if op == "*" && i > 0 && bytes[i - 1] == b'*' {
+                continue;
+            }
+            // Avoid matching `>` or `<` when it's part of `>>` or `<<`.
+            if op == ">" && i + 1 < expr.len() && bytes[i + 1] == b'>' {
+                continue;
+            }
+            if op == "<" && i + 1 < expr.len() && bytes[i + 1] == b'<' {
+                continue;
+            }
+            let left = expr[..i].trim();
+            let right = expr[i + op_len..].trim();
+            if !left.is_empty() && !right.is_empty() {
+                return Some((left, right));
+            }
+        }
+    }
+    None
 }
 
 fn build_signature(decl: &crate::symbol_table::Declaration) -> String {

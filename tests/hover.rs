@@ -2567,3 +2567,194 @@ interface IERC20 {
         "Should show correct ERC-165 interface ID for IERC20, got: {text}"
     );
 }
+
+// ========== CONSTANT EXPRESSION EVALUATION TESTS ==========
+
+#[test]
+fn hover_constant_decimal_literal() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Token {
+    uint256 public constant MAX_SUPPLY = 1000000;
+}
+"#;
+    let (st, path) = setup(source);
+    let pos = source.find("MAX_SUPPLY").unwrap();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col)).unwrap();
+    assert!(
+        text.contains("Value: `1000000 (0xf4240)`"),
+        "Should show computed decimal value with hex, got: {text}"
+    );
+}
+
+#[test]
+fn hover_constant_hex_literal() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Token {
+    uint256 public constant MASK = 0xFF;
+}
+"#;
+    let (st, path) = setup(source);
+    let pos = source.find("MASK").unwrap();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col)).unwrap();
+    assert!(
+        text.contains("Value: `255 (0xFF)`") || text.contains("Value: `255 (0xff)`"),
+        "Should show hex literal as decimal with original hex, got: {text}"
+    );
+}
+
+#[test]
+fn hover_constant_power_expression() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Token {
+    uint256 public constant DECIMALS_FACTOR = 10 ** 18;
+}
+"#;
+    let (st, path) = setup(source);
+    let pos = source.find("DECIMALS_FACTOR").unwrap();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col)).unwrap();
+    assert!(
+        text.contains("Value: `1000000000000000000"),
+        "Should show computed power expression (10**18), got: {text}"
+    );
+}
+
+#[test]
+fn hover_constant_arithmetic_expression() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Config {
+    uint256 public constant RATE = 100 + 50 * 2;
+}
+"#;
+    let (st, path) = setup(source);
+    let pos = source.find("RATE").unwrap();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col)).unwrap();
+    assert!(
+        text.contains("Value: `200 (0xc8)`"),
+        "Should show computed arithmetic expression (100 + 50 * 2 = 200), got: {text}"
+    );
+}
+
+#[test]
+fn hover_constant_bitwise_expression() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Flags {
+    uint256 public constant FLAG = 1 << 8;
+}
+"#;
+    let (st, path) = setup(source);
+    let pos = source.find("FLAG").unwrap();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col)).unwrap();
+    assert!(
+        text.contains("Value: `256 (0x100)`"),
+        "Should show computed bitwise shift (1 << 8 = 256), got: {text}"
+    );
+}
+
+#[test]
+fn hover_constant_string_literal() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Meta {
+    string public constant NAME = "MyToken";
+}
+"#;
+    let (st, path) = setup(source);
+    let pos = source.find("NAME").unwrap();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col)).unwrap();
+    assert!(
+        text.contains(r#"Value: `"MyToken"`"#),
+        "Should show string literal value, got: {text}"
+    );
+}
+
+#[test]
+fn hover_constant_boolean_literal() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Config {
+    bool public constant ENABLED = true;
+}
+"#;
+    let (st, path) = setup(source);
+    let pos = source.find("ENABLED").unwrap();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col)).unwrap();
+    assert!(
+        text.contains("Value: `true`"),
+        "Should show boolean literal value, got: {text}"
+    );
+}
+
+#[test]
+fn hover_constant_parenthesized_expression() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Math {
+    uint256 public constant RESULT = (2 + 3) * 4;
+}
+"#;
+    let (st, path) = setup(source);
+    let pos = source.find("RESULT").unwrap();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col)).unwrap();
+    assert!(
+        text.contains("Value: `20 (0x14)`"),
+        "Should show computed parenthesized expression ((2+3)*4 = 20), got: {text}"
+    );
+}
+
+#[test]
+fn hover_non_constant_variable_no_value() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Token {
+    uint256 public totalSupply;
+}
+"#;
+    let (st, path) = setup(source);
+    let pos = source.find("totalSupply").unwrap();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col)).unwrap();
+    assert!(
+        !text.contains("Value:"),
+        "Non-constant variable should NOT show computed value, got: {text}"
+    );
+}
