@@ -2003,3 +2003,94 @@ contract Foo {
         "Outside assembly should NOT include sload"
     );
 }
+
+// ========== MAPPING VALUE TYPE COMPLETION TESTS ==========
+
+#[test]
+fn mapping_value_type_struct_completion() {
+    let source = "// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Vault {
+    struct UserInfo {
+        uint256 balance;
+        address wallet;
+    }
+
+    mapping(address => UserInfo) public users;
+
+    function getBalance(address user) public view returns (uint256) {
+        return users[user].
+    }
+}
+";
+    let (st, path) = setup(source);
+    // Cursor is at the dot after `users[user].`
+    let labels = completion_labels(&st, &path, source, Position::new(12, 28), Some("."));
+
+    assert!(
+        labels.contains(&"balance".to_string()),
+        "Should complete with struct field 'balance', got: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"wallet".to_string()),
+        "Should complete with struct field 'wallet', got: {labels:?}"
+    );
+}
+
+#[test]
+fn mapping_value_type_address_completion() {
+    let source = "// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Registry {
+    mapping(uint256 => address) public owners;
+
+    function sendTo(uint256 id) public {
+        owners[id].
+    }
+}
+";
+    let (st, path) = setup(source);
+    let labels = completion_labels(&st, &path, source, Position::new(7, 19), Some("."));
+
+    assert!(
+        labels.contains(&"balance".to_string()),
+        "Should complete with address member 'balance', got: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"transfer".to_string()),
+        "Should complete with address member 'transfer', got: {labels:?}"
+    );
+}
+
+#[test]
+fn array_element_struct_completion() {
+    let source = "// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract List {
+    struct Item {
+        string name;
+        uint256 price;
+    }
+
+    Item[] public items;
+
+    function getPrice(uint256 i) public view returns (uint256) {
+        return items[i].
+    }
+}
+";
+    let (st, path) = setup(source);
+    let labels = completion_labels(&st, &path, source, Position::new(12, 25), Some("."));
+
+    assert!(
+        labels.contains(&"name".to_string()),
+        "Should complete with struct field 'name', got: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"price".to_string()),
+        "Should complete with struct field 'price', got: {labels:?}"
+    );
+}

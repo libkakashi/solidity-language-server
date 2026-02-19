@@ -609,6 +609,13 @@ fn get_dot_completions(
         return call_result_completions(st, file, &type_name, scope);
     }
 
+    // Check for subscript expression before dot: `myMapping[key].`
+    // Must be checked before simple identifier extraction.
+    if let Some(base_id) = extract_subscript_before_dot(line, col_byte) {
+        let scope = st.scope_at(file, cursor_byte).unwrap_or(0);
+        return subscript_completions(st, file, &base_id, scope);
+    }
+
     let identifier = match extract_identifier_before_dot(line, col_byte) {
         Some(id) => id,
         None => return vec![],
@@ -711,6 +718,120 @@ fn get_dot_completions(
     }
 
     vec![]
+}
+
+/// Completions for subscript access: `myMapping[key].` or `myArray[i].`.
+/// Looks up the variable, determines the element/value type, and returns
+/// completions for that type.
+fn subscript_completions(
+    st: &SymbolTable,
+    file: &Path,
+    base_id: &str,
+    scope: usize,
+) -> Vec<CompletionItem> {
+    let visible = st.visible_declarations(file, scope);
+    for decl in &visible {
+        if decl.name != base_id {
+            continue;
+        }
+        if let Some(type_text) = decl.type_text() {
+            if let Some(value_type) = extract_mapping_value_type(type_text) {
+                // Try built-in type members first (e.g. address).
+                if let Some(mut items) = builtin_type_members(&value_type) {
+                    append_using_for(st, file, &value_type, &mut items);
+                    return items;
+                }
+                // Try user-defined type members (struct, contract, etc.).
+                let members = st.all_members_of(&value_type, file);
+                if !members.is_empty() {
+                    let mut items: Vec<CompletionItem> =
+                        members.iter().map(member_to_completion).collect();
+                    append_using_for(st, file, &value_type, &mut items);
+                    return items;
+                }
+                // Only using-for methods.
+                let mut items = Vec::new();
+                append_using_for(st, file, &value_type, &mut items);
+                if !items.is_empty() {
+                    return items;
+                }
+            }
+            // Array element type: strip trailing `[]` to get element type.
+            if let Some(elem_type) = extract_array_element_type(type_text) {
+                if let Some(mut items) = builtin_type_members(&elem_type) {
+                    append_using_for(st, file, &elem_type, &mut items);
+                    return items;
+                }
+                let members = st.all_members_of(&elem_type, file);
+                if !members.is_empty() {
+                    let mut items: Vec<CompletionItem> =
+                        members.iter().map(member_to_completion).collect();
+                    append_using_for(st, file, &elem_type, &mut items);
+                    return items;
+                }
+            }
+        }
+    }
+    vec![]
+}
+
+/// Extract the value type from a mapping type string.
+/// E.g. `mapping(address => uint256)` → `uint256`
+/// E.g. `mapping(address => mapping(uint256 => SomeStruct))` → `mapping(uint256 => SomeStruct)`
+fn extract_mapping_value_type(type_text: &str) -> Option<String> {
+    let s = type_text.trim();
+    if !s.starts_with("mapping(") {
+        return None;
+    }
+    let arrow = s.find("=>")?;
+    let after_arrow = &s[arrow + 2..];
+    // Find the matching closing paren, handling nested mappings.
+    let mut depth = 0i32;
+    let mut end = after_arrow.len();
+    for (i, c) in after_arrow.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                if depth == 0 {
+                    end = i;
+                    break;
+                }
+                depth -= 1;
+            }
+            _ => {}
+        }
+    }
+    let value_type = after_arrow[..end].trim();
+    if value_type.is_empty() {
+        return None;
+    }
+    // Strip storage/memory/calldata modifiers.
+    let clean = value_type
+        .strip_suffix(" memory")
+        .or_else(|| value_type.strip_suffix(" storage"))
+        .or_else(|| value_type.strip_suffix(" calldata"))
+        .unwrap_or(value_type)
+        .trim();
+    Some(clean.to_string())
+}
+
+/// Extract the element type from an array type string.
+/// E.g. `uint256[]` → `uint256`, `SomeStruct[]` → `SomeStruct`
+fn extract_array_element_type(type_text: &str) -> Option<String> {
+    let s = type_text.trim();
+    let s = s
+        .strip_suffix(" memory")
+        .or_else(|| s.strip_suffix(" storage"))
+        .or_else(|| s.strip_suffix(" calldata"))
+        .unwrap_or(s)
+        .trim();
+    if let Some(pos) = s.rfind("[]") {
+        let elem = s[..pos].trim();
+        if !elem.is_empty() {
+            return Some(elem.to_string());
+        }
+    }
+    None
 }
 
 /// Append using-for library methods that apply to `type_text`.
@@ -1416,6 +1537,55 @@ fn extract_identifier_before_dot(line: &str, col_byte: u32) -> Option<String> {
         pos -= 1;
     }
 
+    let end = pos;
+    while pos > 0 && (bytes[pos - 1].is_ascii_alphanumeric() || bytes[pos - 1] == b'_') {
+        pos -= 1;
+    }
+
+    if pos == end {
+        return None;
+    }
+
+    Some(String::from_utf8_lossy(&bytes[pos..end]).to_string())
+}
+
+/// Extract the base identifier from `identifier[...].` before the cursor.
+/// Returns the identifier name (e.g. `myMapping` from `myMapping[key].`).
+fn extract_subscript_before_dot(line: &str, col_byte: u32) -> Option<String> {
+    let col = col_byte as usize;
+    if col == 0 {
+        return None;
+    }
+    let bytes = line.as_bytes();
+
+    let mut pos = col;
+    // Skip the dot if present.
+    if pos > 0 && pos <= bytes.len() && bytes[pos - 1] == b'.' {
+        pos -= 1;
+    }
+
+    // Must end with `]`.
+    if pos == 0 || bytes[pos - 1] != b']' {
+        return None;
+    }
+    pos -= 1;
+
+    // Walk backwards through the bracketed expression, counting bracket depth.
+    let mut depth = 1i32;
+    while pos > 0 && depth > 0 {
+        pos -= 1;
+        match bytes[pos] {
+            b']' => depth += 1,
+            b'[' => depth -= 1,
+            _ => {}
+        }
+    }
+
+    if depth != 0 || pos == 0 {
+        return None;
+    }
+
+    // Now extract the identifier before the `[`.
     let end = pos;
     while pos > 0 && (bytes[pos - 1].is_ascii_alphanumeric() || bytes[pos - 1] == b'_') {
         pos -= 1;
