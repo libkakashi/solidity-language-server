@@ -1,7 +1,8 @@
 use tower_lsp::lsp_types::*;
 
-use crate::symbol_table::SymbolTable;
+use crate::symbol_table::{DeclKind, SymbolTable};
 use crate::utils::LineIndex;
+use rustc_hash::FxHashSet;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -14,7 +15,7 @@ pub fn code_actions(
     st: &SymbolTable,
     file: &Path,
     source: &str,
-    _range: Range,
+    range: Range,
     diagnostics: &[Diagnostic],
     line_index: &LineIndex,
     uri: &Url,
@@ -85,6 +86,11 @@ pub fn code_actions(
         if let Some(a) = action_auto_import(st, file, source, diag, line_index, uri) {
             actions.push(CodeActionOrCommand::CodeAction(a));
         }
+    }
+
+    // Source action: generate override stubs for unimplemented interface methods.
+    if let Some(a) = action_generate_overrides(st, file, source, range, line_index, uri) {
+        actions.push(CodeActionOrCommand::CodeAction(a));
     }
 
     actions
@@ -617,6 +623,206 @@ fn find_import_insert_position(source: &str) -> usize {
         .or(pragma_end)
         .unwrap_or(0)
         .min(source.len())
+}
+
+// ---------------------------------------------------------------------------
+// Source action: generate override stubs
+// ---------------------------------------------------------------------------
+
+/// Offer to generate stub implementations for unimplemented interface methods.
+fn action_generate_overrides(
+    st: &SymbolTable,
+    file: &Path,
+    source: &str,
+    range: Range,
+    line_index: &LineIndex,
+    uri: &Url,
+) -> Option<CodeAction> {
+    let fi = st.get_file_index(file)?;
+
+    // Find a contract declaration whose range overlaps the cursor range.
+    let range_start =
+        line_index.position_to_byte_offset(source, range.start.line, range.start.character);
+
+    let contract = fi.declarations.values().find(|d| {
+        matches!(d.kind(), DeclKind::Contract)
+            && d.full_range.0 <= range_start
+            && range_start <= d.full_range.1
+    })?;
+
+    let base_contracts = contract.base_contracts();
+    if base_contracts.is_empty() {
+        return None;
+    }
+
+    // Collect the contract's own function names.
+    let own_members = st.members_of(&contract.name, file);
+    let own_func_names: FxHashSet<String> = own_members
+        .iter()
+        .filter(|m| m.kind == DeclKind::Function)
+        .map(|m| m.name.clone())
+        .collect();
+
+    // Collect all required functions from base interfaces/abstract contracts.
+    let mut stubs = Vec::new();
+    let mut seen = FxHashSet::default();
+
+    for base_name in base_contracts {
+        let base_members = st.all_members_of(base_name, file);
+        for member in &base_members {
+            if member.kind != DeclKind::Function {
+                continue;
+            }
+            if own_func_names.contains(&member.name) {
+                continue;
+            }
+            if !seen.insert(member.name.clone()) {
+                continue;
+            }
+
+            // Look up the full declaration to get parameters and return types.
+            // MemberInfo.decl_id is often None, so fall back to searching
+            // the base type's scope for a function declaration by name.
+            let decl = member
+                .decl_id
+                .as_ref()
+                .and_then(|id| st.get_declaration(id))
+                .or_else(|| find_base_function_decl(st, file, base_name, &member.name));
+
+            if let Some(decl) = decl {
+                let stub = generate_function_stub(decl);
+                if !stub.is_empty() {
+                    stubs.push(stub);
+                }
+            }
+        }
+    }
+
+    if stubs.is_empty() {
+        return None;
+    }
+
+    // Find the insertion point: just before the closing `}` of the contract.
+    let contract_end = contract.full_range.1;
+    // Search backwards from contract_end for the last `}`.
+    let close_brace = source[..contract_end].rfind('}')?;
+    let insert_pos = close_brace;
+    let insert_lsp = line_index.byte_offset_to_lsp_position(source, insert_pos);
+
+    // Build the stubs text with proper indentation.
+    let mut new_text = String::new();
+    for stub in &stubs {
+        new_text.push('\n');
+        for line in stub.lines() {
+            new_text.push_str("    ");
+            new_text.push_str(line);
+            new_text.push('\n');
+        }
+    }
+
+    let count = stubs.len();
+    let title = if count == 1 {
+        format!("Implement 1 missing override")
+    } else {
+        format!("Implement {count} missing overrides")
+    };
+
+    let mut changes = HashMap::new();
+    changes.insert(
+        uri.clone(),
+        vec![TextEdit {
+            range: Range {
+                start: insert_lsp,
+                end: insert_lsp,
+            },
+            new_text,
+        }],
+    );
+
+    Some(CodeAction {
+        title,
+        kind: Some(CodeActionKind::SOURCE),
+        edit: Some(WorkspaceEdit {
+            changes: Some(changes),
+            ..Default::default()
+        }),
+        is_preferred: Some(false),
+        ..Default::default()
+    })
+}
+
+/// Find a function declaration by name inside a base contract/interface.
+/// Searches the file containing the base type's declaration for a matching
+/// function in the type's scope.
+fn find_base_function_decl<'a>(
+    st: &'a SymbolTable,
+    origin_file: &Path,
+    base_name: &str,
+    func_name: &str,
+) -> Option<&'a crate::symbol_table::Declaration> {
+    let decl_id = st.find_type_decl(origin_file, base_name)?;
+    let base_fi = st.files.get(&decl_id.file)?;
+
+    // Find the scope owned by this base type declaration.
+    let scope = base_fi.scopes.iter().find(|s| s.owner == Some(decl_id))?;
+
+    // Look up the function by name in that scope.
+    let func_decl_id = scope.get_decl(func_name)?;
+    base_fi.declarations.get(func_decl_id)
+}
+
+/// Generate a function stub from a declaration.
+fn generate_function_stub(decl: &crate::symbol_table::Declaration) -> String {
+    if decl.kind() != DeclKind::Function {
+        return String::new();
+    }
+
+    let params: Vec<String> = decl
+        .parameters()
+        .iter()
+        .map(|(name, ty)| {
+            if name.is_empty() {
+                ty.clone()
+            } else {
+                format!("{ty} {name}")
+            }
+        })
+        .collect();
+
+    let returns: Vec<String> = decl
+        .return_parameters()
+        .iter()
+        .map(|(name, ty)| {
+            if name.is_empty() {
+                ty.clone()
+            } else {
+                format!("{ty} {name}")
+            }
+        })
+        .collect();
+
+    let mut sig = format!("function {}({})", decl.name, params.join(", "));
+
+    // Use "external" if the base had "external", otherwise use the original visibility.
+    // For overrides, we change "external" to "public" since implementations
+    // should generally be public (or keep external if desired).
+    let vis = decl.visibility().unwrap_or("public");
+    sig.push_str(&format!(" {vis}"));
+
+    if let Some(sm) = decl.state_mutability() {
+        if sm != "nonpayable" {
+            sig.push_str(&format!(" {sm}"));
+        }
+    }
+
+    sig.push_str(" override");
+
+    if !returns.is_empty() {
+        sig.push_str(&format!(" returns ({})", returns.join(", ")));
+    }
+
+    sig.push_str(" {\n    // TODO: implement\n}");
+    sig
 }
 
 // ---------------------------------------------------------------------------

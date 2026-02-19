@@ -1306,3 +1306,175 @@ contract Foo {
         "Non-solar diagnostics should not trigger auto-import"
     );
 }
+
+// ========== GENERATE OVERRIDE STUBS TESTS ==========
+
+#[test]
+fn generate_overrides_for_interface() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+interface IERC20 {
+    function transfer(address to, uint256 amount) external returns (bool);
+    function balanceOf(address account) external view returns (uint256);
+}
+
+contract Token is IERC20 {
+}
+"#;
+    let (st, path) = setup(source);
+    let li = LineIndex::new(source);
+    let uri = Url::from_file_path(&path).unwrap();
+
+    // Cursor inside the Token contract body
+    let contract_pos = source.find("contract Token").unwrap();
+    let start = li.byte_offset_to_lsp_position(source, contract_pos);
+    let end = li.byte_offset_to_lsp_position(source, contract_pos + 10);
+    let range = Range { start, end };
+
+    let actions = code_actions(&st, &path, source, range, &[], &li, &uri);
+
+    let override_actions: Vec<_> = actions
+        .iter()
+        .filter_map(|a| match a {
+            CodeActionOrCommand::CodeAction(ca) if ca.title.contains("override") => Some(ca),
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        !override_actions.is_empty(),
+        "Should offer to generate overrides, got actions: {:?}",
+        actions
+            .iter()
+            .map(|a| match a {
+                CodeActionOrCommand::CodeAction(ca) => ca.title.clone(),
+                CodeActionOrCommand::Command(c) => c.title.clone(),
+            })
+            .collect::<Vec<_>>()
+    );
+
+    let action = override_actions[0];
+    assert!(
+        action.title.contains("2"),
+        "Should offer 2 missing overrides, got: {}",
+        action.title
+    );
+
+    // Check that the edit contains both function stubs
+    let edit = action.edit.as_ref().unwrap();
+    let changes = edit.changes.as_ref().unwrap();
+    let edits = changes.values().next().unwrap();
+    let text = &edits[0].new_text;
+
+    assert!(
+        text.contains("function transfer"),
+        "Stub should contain 'transfer', got: {text}"
+    );
+    assert!(
+        text.contains("function balanceOf"),
+        "Stub should contain 'balanceOf', got: {text}"
+    );
+    assert!(
+        text.contains("override"),
+        "Stub should contain 'override', got: {text}"
+    );
+}
+
+#[test]
+fn generate_overrides_skips_already_implemented() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+interface IERC20 {
+    function transfer(address to, uint256 amount) external returns (bool);
+    function balanceOf(address account) external view returns (uint256);
+}
+
+contract Token is IERC20 {
+    function transfer(address to, uint256 amount) external override returns (bool) {
+        return true;
+    }
+}
+"#;
+    let (st, path) = setup(source);
+    let li = LineIndex::new(source);
+    let uri = Url::from_file_path(&path).unwrap();
+
+    let contract_pos = source.find("contract Token").unwrap();
+    let start = li.byte_offset_to_lsp_position(source, contract_pos);
+    let end = li.byte_offset_to_lsp_position(source, contract_pos + 10);
+    let range = Range { start, end };
+
+    let actions = code_actions(&st, &path, source, range, &[], &li, &uri);
+
+    let override_actions: Vec<_> = actions
+        .iter()
+        .filter_map(|a| match a {
+            CodeActionOrCommand::CodeAction(ca) if ca.title.contains("override") => Some(ca),
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        !override_actions.is_empty(),
+        "Should offer override for balanceOf (transfer already implemented)"
+    );
+
+    let action = override_actions[0];
+    assert!(
+        action.title.contains("1"),
+        "Should offer 1 missing override (not 2), got: {}",
+        action.title
+    );
+
+    let edit = action.edit.as_ref().unwrap();
+    let changes = edit.changes.as_ref().unwrap();
+    let text = &changes.values().next().unwrap()[0].new_text;
+    assert!(
+        text.contains("balanceOf"),
+        "Should generate stub for balanceOf"
+    );
+    assert!(
+        !text.contains("function transfer"),
+        "Should NOT generate stub for transfer (already implemented)"
+    );
+}
+
+#[test]
+fn no_overrides_for_fully_implemented_contract() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+interface ISimple {
+    function foo() external;
+}
+
+contract Impl is ISimple {
+    function foo() external override {}
+}
+"#;
+    let (st, path) = setup(source);
+    let li = LineIndex::new(source);
+    let uri = Url::from_file_path(&path).unwrap();
+
+    let contract_pos = source.find("contract Impl").unwrap();
+    let start = li.byte_offset_to_lsp_position(source, contract_pos);
+    let end = li.byte_offset_to_lsp_position(source, contract_pos + 10);
+    let range = Range { start, end };
+
+    let actions = code_actions(&st, &path, source, range, &[], &li, &uri);
+
+    let override_actions: Vec<_> = actions
+        .iter()
+        .filter(|a| match a {
+            CodeActionOrCommand::CodeAction(ca) => ca.title.contains("override"),
+            _ => false,
+        })
+        .collect();
+
+    assert!(
+        override_actions.is_empty(),
+        "Should NOT offer overrides when all methods are implemented"
+    );
+}
