@@ -96,6 +96,18 @@ pub fn handle_completion(
         }
     }
 
+    // Check for assembly/Yul context.
+    if trigger_char != Some(".") {
+        if let Some(t) = tree {
+            if is_in_assembly(t, abs_byte) {
+                return Some(CompletionResponse::List(CompletionList {
+                    is_incomplete: false,
+                    items: yul_completions(),
+                }));
+            }
+        }
+    }
+
     let items = if trigger_char == Some(".") {
         get_dot_completions(st, file, source, line, col_byte, abs_byte)
     } else {
@@ -389,6 +401,188 @@ fn get_emit_revert_completions(
 
     let _ = keyword; // used for clarity in the match above
     Some(items)
+}
+
+// ---------------------------------------------------------------------------
+// Assembly / Yul completion
+// ---------------------------------------------------------------------------
+
+/// Check if the cursor is inside an `assembly { }` block.
+fn is_in_assembly(tree: &tree_sitter::Tree, byte_offset: usize) -> bool {
+    let node = match tree
+        .root_node()
+        .descendant_for_byte_range(byte_offset, byte_offset)
+    {
+        Some(n) => n,
+        None => return false,
+    };
+    let mut current = Some(node);
+    while let Some(n) = current {
+        if n.kind() == "assembly_statement" {
+            return true;
+        }
+        current = n.parent();
+    }
+    false
+}
+
+/// Return cached Yul/assembly completions.
+fn yul_completions() -> Vec<CompletionItem> {
+    static CACHE: OnceLock<Vec<CompletionItem>> = OnceLock::new();
+    CACHE.get_or_init(build_yul_completions).clone()
+}
+
+fn build_yul_completions() -> Vec<CompletionItem> {
+    // (name, description)
+    let builtins: &[(&str, &str)] = &[
+        // Arithmetic
+        ("add(x, y)", "x + y"),
+        ("sub(x, y)", "x - y"),
+        ("mul(x, y)", "x * y"),
+        ("div(x, y)", "x / y (unsigned)"),
+        ("sdiv(x, y)", "x / y (signed)"),
+        ("mod(x, y)", "x % y (unsigned)"),
+        ("smod(x, y)", "x % y (signed)"),
+        ("exp(x, y)", "x ** y"),
+        ("not(x)", "bitwise NOT"),
+        ("lt(x, y)", "x < y"),
+        ("gt(x, y)", "x > y"),
+        ("slt(x, y)", "x < y (signed)"),
+        ("sgt(x, y)", "x > y (signed)"),
+        ("eq(x, y)", "x == y"),
+        ("iszero(x)", "x == 0"),
+        ("and(x, y)", "bitwise AND"),
+        ("or(x, y)", "bitwise OR"),
+        ("xor(x, y)", "bitwise XOR"),
+        ("byte(n, x)", "nth byte of x"),
+        ("shl(shift, val)", "val << shift"),
+        ("shr(shift, val)", "val >> shift (logical)"),
+        ("sar(shift, val)", "val >> shift (arithmetic)"),
+        ("addmod(x, y, m)", "(x + y) % m"),
+        ("mulmod(x, y, m)", "(x * y) % m"),
+        ("signextend(b, x)", "sign extend x from bit b"),
+        // Hashing
+        (
+            "keccak256(offset, size)",
+            "keccak256(mem[offset..offset+size])",
+        ),
+        // Environment
+        ("address()", "current contract address"),
+        ("balance(addr)", "balance of addr in wei"),
+        ("selfbalance()", "balance of current contract"),
+        ("caller()", "msg.sender"),
+        ("callvalue()", "msg.value"),
+        ("calldataload(offset)", "load 32 bytes from calldata"),
+        ("calldatasize()", "size of calldata"),
+        ("calldatacopy(dst, src, len)", "copy calldata to memory"),
+        ("codesize()", "size of current contract code"),
+        ("codecopy(dst, src, len)", "copy code to memory"),
+        ("extcodesize(addr)", "size of code at addr"),
+        (
+            "extcodecopy(addr, dst, src, len)",
+            "copy code at addr to memory",
+        ),
+        ("returndatasize()", "size of last return data"),
+        (
+            "returndatacopy(dst, src, len)",
+            "copy return data to memory",
+        ),
+        ("extcodehash(addr)", "code hash of addr"),
+        // Block info
+        ("blockhash(blockNum)", "hash of block blockNum"),
+        ("coinbase()", "current block miner"),
+        ("timestamp()", "current block timestamp"),
+        ("number()", "current block number"),
+        ("difficulty()", "current block difficulty"),
+        ("prevrandao()", "previous block RANDAO value"),
+        ("gaslimit()", "block gas limit"),
+        ("chainid()", "chain ID"),
+        ("basefee()", "current base fee"),
+        ("blobbasefee()", "blob base fee"),
+        ("blobhash(idx)", "blob versioned hash at index"),
+        ("origin()", "tx.origin"),
+        ("gasprice()", "tx.gasprice"),
+        ("gas()", "remaining gas"),
+        // Memory
+        ("mload(offset)", "load 32 bytes from memory"),
+        ("mstore(offset, val)", "store 32 bytes to memory"),
+        ("mstore8(offset, val)", "store 1 byte to memory"),
+        ("msize()", "size of memory"),
+        ("mcopy(dst, src, len)", "copy memory"),
+        // Storage
+        ("sload(key)", "load from storage"),
+        ("sstore(key, val)", "store to storage"),
+        ("tload(key)", "load from transient storage"),
+        ("tstore(key, val)", "store to transient storage"),
+        // Control flow
+        ("stop()", "halt execution"),
+        ("return(offset, size)", "return mem[offset..offset+size]"),
+        (
+            "revert(offset, size)",
+            "revert with mem[offset..offset+size]",
+        ),
+        ("invalid()", "invalid instruction (consume all gas)"),
+        ("selfdestruct(addr)", "destroy contract, send funds to addr"),
+        // Calls
+        (
+            "call(g, addr, val, in, insize, out, outsize)",
+            "call contract",
+        ),
+        (
+            "callcode(g, addr, val, in, insize, out, outsize)",
+            "callcode",
+        ),
+        (
+            "delegatecall(g, addr, in, insize, out, outsize)",
+            "delegatecall",
+        ),
+        (
+            "staticcall(g, addr, in, insize, out, outsize)",
+            "staticcall",
+        ),
+        ("create(val, offset, size)", "create contract"),
+        ("create2(val, offset, size, salt)", "create2 contract"),
+        // Logging
+        ("log0(offset, size)", "emit log with 0 topics"),
+        ("log1(offset, size, t1)", "emit log with 1 topic"),
+        ("log2(offset, size, t1, t2)", "emit log with 2 topics"),
+        ("log3(offset, size, t1, t2, t3)", "emit log with 3 topics"),
+        (
+            "log4(offset, size, t1, t2, t3, t4)",
+            "emit log with 4 topics",
+        ),
+        // Data
+        ("datasize(name)", "size of named object"),
+        ("dataoffset(name)", "offset of named object"),
+        ("datacopy(dst, src, len)", "copy object data to memory"),
+        ("setimmutable(offset, name, val)", "set immutable variable"),
+        ("loadimmutable(name)", "load immutable variable"),
+    ];
+
+    let mut items: Vec<CompletionItem> = builtins
+        .iter()
+        .map(|&(label, detail)| CompletionItem {
+            label: label.to_string(),
+            kind: Some(CompletionItemKind::FUNCTION),
+            detail: Some(detail.to_string()),
+            ..Default::default()
+        })
+        .collect();
+
+    // Yul keywords
+    let keywords = &[
+        "let", "if", "switch", "case", "default", "for", "break", "continue", "function", "leave",
+        "true", "false",
+    ];
+    for kw in keywords {
+        items.push(CompletionItem {
+            label: kw.to_string(),
+            kind: Some(CompletionItemKind::KEYWORD),
+            ..Default::default()
+        });
+    }
+
+    items
 }
 
 // ---------------------------------------------------------------------------

@@ -1909,3 +1909,97 @@ contract Foo {
         "emit Tr should still suggest Approval (client does filtering)"
     );
 }
+
+// ========== ASSEMBLY / YUL COMPLETION TESTS ==========
+
+#[test]
+fn assembly_completion_shows_yul_builtins() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Foo {
+    function bar() public view returns (uint256 result) {
+        assembly {
+            result := add(1, 2)
+
+        }
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    // Position on the blank line inside the assembly block (line 7, after the add line)
+    let target = source.find("add(1, 2)").unwrap() + "add(1, 2)".len();
+    // Go to the next line (the blank line inside assembly)
+    let next_line_start = source[target..].find('\n').unwrap() + target + 1;
+    let line = source[..next_line_start].matches('\n').count() as u32;
+    let col = 12u32; // indentation inside assembly
+
+    let labels = completion_labels_with_tree(&st, &path, source, Position::new(line, col), None);
+
+    // Should include Yul builtins
+    assert!(
+        labels.iter().any(|l| l.starts_with("mload")),
+        "Assembly should include mload, got: {labels:?}"
+    );
+    assert!(
+        labels.iter().any(|l| l.starts_with("sload")),
+        "Assembly should include sload"
+    );
+    assert!(
+        labels.iter().any(|l| l.starts_with("caller")),
+        "Assembly should include caller"
+    );
+    assert!(
+        labels.iter().any(|l| l.starts_with("add")),
+        "Assembly should include add"
+    );
+    // Should include Yul keywords
+    assert!(
+        labels.contains(&"let".to_string()),
+        "Assembly should include 'let' keyword"
+    );
+    assert!(
+        labels.contains(&"switch".to_string()),
+        "Assembly should include 'switch' keyword"
+    );
+    // Should NOT include Solidity keywords
+    assert!(
+        !labels.contains(&"contract".to_string()),
+        "Assembly should NOT include Solidity keywords"
+    );
+    assert!(
+        !labels.contains(&"mapping".to_string()),
+        "Assembly should NOT include 'mapping'"
+    );
+}
+
+#[test]
+fn outside_assembly_no_yul_builtins() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Foo {
+    function bar() public {
+
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    let labels = completion_labels_with_tree(&st, &path, source, Position::new(5, 8), None);
+
+    // Should include Solidity keywords, not Yul
+    assert!(
+        labels.contains(&"uint256".to_string()),
+        "Outside assembly should include uint256, got: {labels:?}"
+    );
+    assert!(
+        !labels.iter().any(|l| l.starts_with("mload")),
+        "Outside assembly should NOT include mload"
+    );
+    assert!(
+        !labels.iter().any(|l| l.starts_with("sload")),
+        "Outside assembly should NOT include sload"
+    );
+}
