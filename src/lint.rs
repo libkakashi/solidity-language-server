@@ -1,4 +1,4 @@
-use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, NumberOrString};
+use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, DiagnosticTag, NumberOrString};
 use tree_sitter::{Node, Query, QueryCursor, StreamingIterator, Tree};
 
 // ---------------------------------------------------------------------------
@@ -589,6 +589,115 @@ fn collect_identifiers<'a>(
 }
 
 // ---------------------------------------------------------------------------
+// Dead code detection (symbol-table-aware)
+// ---------------------------------------------------------------------------
+
+/// Detect unused internal/private functions and private state variables.
+/// Must be called after the symbol table has been populated and references resolved.
+pub fn check_dead_code(
+    st: &crate::symbol_table::SymbolTable,
+    file: &std::path::Path,
+    source: &str,
+    line_index: &crate::utils::LineIndex,
+) -> Vec<Diagnostic> {
+    use crate::symbol_table::{DeclKind, SYNTHETIC_BASE, ScopeKind};
+
+    let file_id = match st.lookup_file_id(file) {
+        Some(id) => id,
+        None => return vec![],
+    };
+    let fi = match st.files.get(&file_id) {
+        Some(fi) => fi,
+        None => return vec![],
+    };
+
+    let mut diagnostics = Vec::new();
+
+    for decl in fi.declarations.values() {
+        // Skip synthetic built-in declarations.
+        if decl.id.byte_offset >= SYNTHETIC_BASE {
+            continue;
+        }
+
+        match decl.kind() {
+            DeclKind::Function => {
+                // Only flag internal/private functions (not external/public).
+                let vis = decl.visibility().unwrap_or("internal");
+                if vis == "external" || vis == "public" {
+                    continue;
+                }
+                // Skip constructors, fallbacks, etc. (they have DeclKind::Constructor etc.)
+                // Skip functions in interfaces (all are implicitly external).
+                let scope = match fi.scopes.get(decl.scope) {
+                    Some(s) => s,
+                    None => continue,
+                };
+                if scope.kind == ScopeKind::Interface {
+                    continue;
+                }
+
+                // Check if this function has any references.
+                let refs = st.find_references(&decl.id);
+                if refs.is_empty() {
+                    diagnostics.push(Diagnostic {
+                        range: line_index.byte_range_to_lsp_range(
+                            source,
+                            decl.name_range.0,
+                            decl.name_range.1,
+                        ),
+                        severity: Some(DiagnosticSeverity::HINT),
+                        code: Some(NumberOrString::String("dead-code".to_string())),
+                        source: Some("ts-lint".into()),
+                        message: format!(
+                            "[lint] function `{}` is declared but never used",
+                            decl.name
+                        ),
+                        tags: Some(vec![DiagnosticTag::UNNECESSARY]),
+                        ..Default::default()
+                    });
+                }
+            }
+            DeclKind::StateVariable => {
+                // Only flag private state variables (not public ones which
+                // generate getters and may be used externally).
+                let vis = decl.visibility().unwrap_or("internal");
+                if vis == "public" {
+                    continue;
+                }
+                // Skip constants and immutables — they are often used as
+                // configuration values and are cheap, so flagging them is noisy.
+                if decl.is_constant() || decl.is_immutable() {
+                    continue;
+                }
+
+                let refs = st.find_references(&decl.id);
+                if refs.is_empty() {
+                    diagnostics.push(Diagnostic {
+                        range: line_index.byte_range_to_lsp_range(
+                            source,
+                            decl.name_range.0,
+                            decl.name_range.1,
+                        ),
+                        severity: Some(DiagnosticSeverity::HINT),
+                        code: Some(NumberOrString::String("dead-code".to_string())),
+                        source: Some("ts-lint".into()),
+                        message: format!(
+                            "[lint] state variable `{}` is declared but never used",
+                            decl.name
+                        ),
+                        tags: Some(vec![DiagnosticTag::UNNECESSARY]),
+                        ..Default::default()
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    diagnostics
+}
+
+// ---------------------------------------------------------------------------
 // Rule registration
 // ---------------------------------------------------------------------------
 
@@ -1006,5 +1115,165 @@ contract Foo {
         let ids = lint_ids(source);
         assert!(ids.contains(&"unused-import".to_string()), "ids: {ids:?}");
         assert_eq!(ids.iter().filter(|id| *id == "unused-import").count(), 1);
+    }
+
+    // Dead code detection tests (require symbol table)
+
+    fn dead_code_ids(source: &str) -> Vec<String> {
+        let mut parser = TsParser::new();
+        let path = std::path::PathBuf::from("/tmp/test.sol");
+        let resolver =
+            crate::import_resolver::ImportResolver::with_root(std::path::PathBuf::from("/tmp"));
+        let mut st = crate::symbol_table::SymbolTable::new(resolver);
+        st.index_file(&path, source, &mut parser);
+        st.resolve_file_references(&path, &mut parser);
+        let line_index = crate::utils::LineIndex::new(source);
+        super::check_dead_code(&st, &path, source, &line_index)
+            .into_iter()
+            .filter_map(|d| {
+                d.code.map(|c| match c {
+                    NumberOrString::String(s) => s,
+                    NumberOrString::Number(n) => n.to_string(),
+                })
+            })
+            .collect()
+    }
+
+    fn dead_code_messages(source: &str) -> Vec<String> {
+        let mut parser = TsParser::new();
+        let path = std::path::PathBuf::from("/tmp/test.sol");
+        let resolver =
+            crate::import_resolver::ImportResolver::with_root(std::path::PathBuf::from("/tmp"));
+        let mut st = crate::symbol_table::SymbolTable::new(resolver);
+        st.index_file(&path, source, &mut parser);
+        st.resolve_file_references(&path, &mut parser);
+        let line_index = crate::utils::LineIndex::new(source);
+        super::check_dead_code(&st, &path, source, &line_index)
+            .into_iter()
+            .map(|d| d.message)
+            .collect()
+    }
+
+    #[test]
+    fn test_dead_code_unused_internal_function() {
+        let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Foo {
+    function _unused() internal pure returns (uint256) {
+        return 42;
+    }
+
+    function bar() public pure returns (uint256) {
+        return 1;
+    }
+}
+"#;
+        let ids = dead_code_ids(source);
+        assert!(
+            ids.contains(&"dead-code".to_string()),
+            "should flag unused internal function, got: {ids:?}"
+        );
+        let msgs = dead_code_messages(source);
+        assert!(
+            msgs.iter().any(|m| m.contains("_unused")),
+            "should mention _unused, got: {msgs:?}"
+        );
+    }
+
+    #[test]
+    fn test_dead_code_used_internal_function_not_flagged() {
+        let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Foo {
+    function _helper() internal pure returns (uint256) {
+        return 42;
+    }
+
+    function bar() public pure returns (uint256) {
+        return _helper();
+    }
+}
+"#;
+        let msgs = dead_code_messages(source);
+        assert!(
+            !msgs.iter().any(|m| m.contains("_helper")),
+            "used internal function should not be flagged, got: {msgs:?}"
+        );
+    }
+
+    #[test]
+    fn test_dead_code_public_function_not_flagged() {
+        let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Foo {
+    function bar() public pure returns (uint256) {
+        return 1;
+    }
+}
+"#;
+        let ids = dead_code_ids(source);
+        assert!(
+            ids.is_empty(),
+            "public functions should not be flagged as dead code, got: {ids:?}"
+        );
+    }
+
+    #[test]
+    fn test_dead_code_unused_private_state_variable() {
+        let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Foo {
+    uint256 private _unused;
+
+    function bar() public pure returns (uint256) {
+        return 1;
+    }
+}
+"#;
+        let msgs = dead_code_messages(source);
+        assert!(
+            msgs.iter().any(|m| m.contains("_unused")),
+            "should flag unused private state variable, got: {msgs:?}"
+        );
+    }
+
+    #[test]
+    fn test_dead_code_public_state_variable_not_flagged() {
+        let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Foo {
+    uint256 public totalSupply;
+}
+"#;
+        let ids = dead_code_ids(source);
+        assert!(
+            !ids.iter().any(|id| id == "dead-code"),
+            "public state variables should not be flagged, got: {ids:?}"
+        );
+    }
+
+    #[test]
+    fn test_dead_code_used_state_variable_not_flagged() {
+        let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Foo {
+    uint256 private _count;
+
+    function increment() public {
+        _count += 1;
+    }
+}
+"#;
+        let msgs = dead_code_messages(source);
+        assert!(
+            !msgs.iter().any(|m| m.contains("_count")),
+            "used state variable should not be flagged, got: {msgs:?}"
+        );
     }
 }
