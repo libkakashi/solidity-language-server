@@ -1816,3 +1816,96 @@ contract Foo {
         "Block NatSpec should include @param"
     );
 }
+
+// ========== EMIT / REVERT CONTEXTUAL COMPLETION TESTS ==========
+
+#[test]
+fn emit_completion_shows_only_events() {
+    let source = "// SPDX-License-Identifier: MIT\npragma solidity ^0.8.29;\n\ncontract Foo {\n    event Transfer(address indexed from, address indexed to, uint256 value);\n    event Approval(address indexed owner, address indexed spender, uint256 value);\n    error InsufficientBalance(uint256 available, uint256 required);\n\n    function bar() public {\n        emit \n    }\n}\n";
+    let (st, path) = setup(source);
+
+    let pos = source.find("emit \n").unwrap() + "emit ".len();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let labels = completion_labels(&st, &path, source, Position::new(line, col), None);
+
+    assert!(
+        labels.contains(&"Transfer".to_string()),
+        "emit should suggest Transfer event, got: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"Approval".to_string()),
+        "emit should suggest Approval event"
+    );
+    assert!(
+        !labels.contains(&"InsufficientBalance".to_string()),
+        "emit should NOT suggest errors"
+    );
+    assert!(
+        !labels.contains(&"bar".to_string()),
+        "emit should NOT suggest functions"
+    );
+}
+
+#[test]
+fn revert_completion_shows_only_errors() {
+    let source = "// SPDX-License-Identifier: MIT\npragma solidity ^0.8.29;\n\ncontract Foo {\n    event Transfer(address indexed from, address indexed to, uint256 value);\n    error InsufficientBalance(uint256 available, uint256 required);\n    error Unauthorized();\n\n    function bar() public {\n        revert \n    }\n}\n";
+    let (st, path) = setup(source);
+
+    let pos = source.find("revert \n").unwrap() + "revert ".len();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let labels = completion_labels(&st, &path, source, Position::new(line, col), None);
+
+    assert!(
+        labels.contains(&"InsufficientBalance".to_string()),
+        "revert should suggest InsufficientBalance error, got: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"Unauthorized".to_string()),
+        "revert should suggest Unauthorized error"
+    );
+    assert!(
+        !labels.contains(&"Transfer".to_string()),
+        "revert should NOT suggest events"
+    );
+    assert!(
+        !labels.contains(&"bar".to_string()),
+        "revert should NOT suggest functions"
+    );
+}
+
+#[test]
+fn emit_completion_with_partial_name() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Foo {
+    event Transfer(address indexed from, address indexed to, uint256 value);
+    event Approval(address indexed owner, address indexed spender, uint256 value);
+
+    function bar() public {
+        emit Tr
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    // Position after "emit Tr" — should still trigger emit context
+    let pos = source.find("emit Tr").unwrap() + "emit Tr".len();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let labels = completion_labels(&st, &path, source, Position::new(line, col), None);
+
+    assert!(
+        labels.contains(&"Transfer".to_string()),
+        "emit Tr should still suggest Transfer, got: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"Approval".to_string()),
+        "emit Tr should still suggest Approval (client does filtering)"
+    );
+}

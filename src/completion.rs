@@ -86,6 +86,16 @@ pub fn handle_completion(
         }));
     }
 
+    // Check for emit/revert contextual completion.
+    if trigger_char != Some(".") {
+        if let Some(items) = get_emit_revert_completions(st, file, abs_byte, line, col_byte) {
+            return Some(CompletionResponse::List(CompletionList {
+                is_incomplete: false,
+                items,
+            }));
+        }
+    }
+
     let items = if trigger_char == Some(".") {
         get_dot_completions(st, file, source, line, col_byte, abs_byte)
     } else {
@@ -329,6 +339,56 @@ fn extract_param_names_from_node(node: tree_sitter::Node, source: &str) -> Vec<S
         }
     }
     params
+}
+
+// ---------------------------------------------------------------------------
+// Emit / revert contextual completion
+// ---------------------------------------------------------------------------
+
+/// After `emit `, show only events. After `revert `, show only custom errors.
+fn get_emit_revert_completions(
+    st: &SymbolTable,
+    file: &Path,
+    byte_offset: usize,
+    line: &str,
+    col_byte: u32,
+) -> Option<Vec<CompletionItem>> {
+    let col = col_byte as usize;
+    let before = line[..col.min(line.len())].trim_start();
+
+    let (keyword, target_kind) = if let Some(rest) = before.strip_prefix("emit ") {
+        // Allow partial identifier after "emit " (e.g. "emit Tr")
+        if rest.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            ("emit", DeclKind::Event)
+        } else {
+            return None;
+        }
+    } else if let Some(rest) = before.strip_prefix("revert ") {
+        if rest.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            ("revert", DeclKind::Error)
+        } else {
+            return None;
+        }
+    } else {
+        return None;
+    };
+
+    let scope_id = st.scope_at(file, byte_offset).unwrap_or(0);
+    let visible = st.visible_declarations(file, scope_id);
+
+    let items: Vec<CompletionItem> = visible
+        .iter()
+        .filter(|decl| decl.kind() == target_kind)
+        .map(|decl| CompletionItem {
+            label: decl.name.clone(),
+            kind: Some(decl_kind_to_completion_kind(decl.kind())),
+            detail: decl.type_text().map(|s| s.to_string()),
+            ..Default::default()
+        })
+        .collect();
+
+    let _ = keyword; // used for clarity in the match above
+    Some(items)
 }
 
 // ---------------------------------------------------------------------------
