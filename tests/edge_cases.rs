@@ -1303,7 +1303,7 @@ fn large_file_operations() {
 #[test]
 fn empty_contract_operations() {
     let source = r#"// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.29;
+pragma solidity 0.8.29;
 
 contract Empty {}
 "#;

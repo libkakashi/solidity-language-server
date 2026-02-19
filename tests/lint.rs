@@ -98,7 +98,7 @@ contract A {
 #[test]
 fn test_no_lint_on_clean_code() {
     let source = r#"// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.29;
+pragma solidity 0.8.29;
 
 contract Clean {
     uint256 public value;
@@ -537,7 +537,7 @@ contract BadContract {
 #[test]
 fn test_empty_contract_no_lints() {
     let source = r#"// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.29;
+pragma solidity 0.8.29;
 
 contract Empty {
 }
@@ -617,7 +617,7 @@ contract TestContract {
 #[test]
 fn test_no_false_positive_on_well_written_contract() {
     let source = r#"// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.29;
+pragma solidity 0.8.29;
 
 contract WellWritten {
     uint256 constant MAX_SUPPLY = 1000;

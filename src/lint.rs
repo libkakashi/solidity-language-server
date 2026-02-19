@@ -436,6 +436,47 @@ fn filter_unsafe_cheatcode(
     })
 }
 
+fn filter_floating_pragma(
+    _rule: &LintRule,
+    source: &str,
+    captures: &[(&str, Node)],
+) -> Option<LintHit> {
+    let pragma_node = find_capture(captures, "pragma")?;
+    let text = node_text(pragma_node, source);
+
+    // Only check solidity version pragmas.
+    if !text.contains("solidity") {
+        return None;
+    }
+
+    // Extract the version constraint part (after "pragma solidity").
+    let version_part = text
+        .strip_prefix("pragma")?
+        .trim()
+        .strip_prefix("solidity")?
+        .trim()
+        .trim_end_matches(';')
+        .trim();
+
+    // Check for floating version specifiers.
+    if version_part.starts_with('^')
+        || version_part.starts_with('>')
+        || version_part.starts_with('<')
+        || version_part.contains(">=")
+        || version_part.contains("<=")
+    {
+        return Some(LintHit {
+            start_byte: pragma_node.start_byte(),
+            end_byte: pragma_node.end_byte(),
+            message: format!(
+                "floating pragma `{version_part}` — consider locking to a specific version"
+            ),
+        });
+    }
+
+    None
+}
+
 fn filter_missing_zero_check(
     _rule: &LintRule,
     source: &str,
@@ -978,6 +1019,15 @@ fn build_rules(lang: &tree_sitter::Language) -> Vec<LintRule> {
     );
 
     add_rule!(
+        "floating-pragma",
+        "floating pragma — consider locking to a specific version",
+        DiagnosticSeverity::INFORMATION,
+        include_str!("queries/floating_pragma.scm"),
+        "pragma",
+        Some(filter_floating_pragma)
+    );
+
+    add_rule!(
         "missing-zero-check",
         "address parameter not checked against zero address",
         DiagnosticSeverity::INFORMATION,
@@ -1440,6 +1490,64 @@ contract Foo {
         assert!(
             ids.contains(&"tx-origin".to_string()),
             "should flag tx.origin in require, got: {ids:?}"
+        );
+    }
+
+    // Floating pragma tests
+
+    #[test]
+    fn test_floating_pragma_caret_flagged() {
+        let source = r#"
+pragma solidity ^0.8.29;
+
+contract Foo {}
+"#;
+        let ids = lint_ids(source);
+        assert!(
+            ids.contains(&"floating-pragma".to_string()),
+            "should flag ^0.8.29 as floating pragma, got: {ids:?}"
+        );
+    }
+
+    #[test]
+    fn test_floating_pragma_gte_flagged() {
+        let source = r#"
+pragma solidity >=0.8.0;
+
+contract Foo {}
+"#;
+        let ids = lint_ids(source);
+        assert!(
+            ids.contains(&"floating-pragma".to_string()),
+            "should flag >=0.8.0 as floating pragma, got: {ids:?}"
+        );
+    }
+
+    #[test]
+    fn test_locked_pragma_not_flagged() {
+        let source = r#"
+pragma solidity 0.8.29;
+
+contract Foo {}
+"#;
+        let ids = lint_ids(source);
+        assert!(
+            !ids.contains(&"floating-pragma".to_string()),
+            "locked pragma should not be flagged, got: {ids:?}"
+        );
+    }
+
+    #[test]
+    fn test_non_solidity_pragma_not_flagged() {
+        let source = r#"
+pragma abicoder v2;
+
+contract Foo {}
+"#;
+        let ids = lint_ids(source);
+        assert!(
+            !ids.contains(&"floating-pragma".to_string()),
+            "non-solidity pragma should not be flagged, got: {ids:?}"
         );
     }
 
