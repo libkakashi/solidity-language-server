@@ -2336,6 +2336,7 @@ dependencies = [
  "rustc-hash",
  "solar-compiler",
  "tempfile",
+ "tiny-keccak",
  "tokio",
  "toml",
  "tower-lsp",
@@ -2485,6 +2486,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f60246a4944f24f6e018aa17cdeffb7818b76356965d03b07d6a9886e8962185"
 dependencies = [
  "cfg-if",
+]
+
+[[package]]
+name = "tiny-keccak"
+version = "2.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2c9d3793400a45f954c52e73d068316d76b6f4e36977e3fcebb13a2721e80237"
+dependencies = [
+ "crunchy",
 ]
 
 [[package]]

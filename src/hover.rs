@@ -22,6 +22,11 @@ pub fn hover_info(
         let sig = build_signature(decl);
         parts.push(format!("```solidity\n{sig}\n```"));
 
+        // Add ABI information for functions, events, errors, and interfaces.
+        if let Some(abi_info) = build_abi_info(decl, st, file) {
+            parts.push(abi_info);
+        }
+
         if let Some(natspec) = decl.natspec() {
             let formatted = format_natspec(natspec);
             if !formatted.is_empty() {
@@ -52,10 +57,7 @@ fn magic_hover(
     position: Position,
 ) -> Option<Hover> {
     let line_start = line_index.line_start(position.line);
-    let line_text = source[line_start..]
-        .lines()
-        .next()
-        .unwrap_or("");
+    let line_text = source[line_start..].lines().next().unwrap_or("");
     let col = byte_offset - line_start;
 
     // Extract the token (identifier) at cursor position.
@@ -140,7 +142,9 @@ fn type_expr_hover(line: &str, tok_start: usize, tok_end: usize, token: &str) ->
         }
         return Some(make_hover(
             &format!("type({type_name})"),
-            Some(&format!("Returns meta type information for `{type_name}`.\n\nMembers provide compile-time constants such as `.min`, `.max`, `.interfaceId`, `.name`, `.creationCode`, and `.runtimeCode`.")),
+            Some(&format!(
+                "Returns meta type information for `{type_name}`.\n\nMembers provide compile-time constants such as `.min`, `.max`, `.interfaceId`, `.name`, `.creationCode`, and `.runtimeCode`."
+            )),
         ));
     }
 
@@ -179,7 +183,9 @@ fn type_expr_hover(line: &str, tok_start: usize, tok_end: usize, token: &str) ->
 
     Some(make_hover(
         &format!("type({token})"),
-        Some(&format!("Returns meta type information for `{token}`.\n\nMembers provide compile-time constants such as `.min`, `.max`, `.interfaceId`, `.name`, `.creationCode`, and `.runtimeCode`.")),
+        Some(&format!(
+            "Returns meta type information for `{token}`.\n\nMembers provide compile-time constants such as `.min`, `.max`, `.interfaceId`, `.name`, `.creationCode`, and `.runtimeCode`."
+        )),
     ))
 }
 
@@ -210,8 +216,14 @@ fn type_member_signature(
     let is_int = type_name.starts_with("uint") || type_name.starts_with("int");
     if is_int {
         return match member {
-            "min" => Some((format!("{type_name} type({type_name}).min"), Some("The smallest value representable by type T.".to_string()))),
-            "max" => Some((format!("{type_name} type({type_name}).max"), Some("The largest value representable by type T.".to_string()))),
+            "min" => Some((
+                format!("{type_name} type({type_name}).min"),
+                Some("The smallest value representable by type T.".to_string()),
+            )),
+            "max" => Some((
+                format!("{type_name} type({type_name}).max"),
+                Some("The largest value representable by type T.".to_string()),
+            )),
             _ => None,
         };
     }
@@ -239,7 +251,10 @@ fn type_member_signature(
     type_member_signature_contract(type_name, member)
 }
 
-fn type_member_signature_contract(type_name: &str, member: &str) -> Option<(String, Option<String>)> {
+fn type_member_signature_contract(
+    type_name: &str,
+    member: &str,
+) -> Option<(String, Option<String>)> {
     match member {
         "name" => Some((format!("string type({type_name}).name"), Some("The name of the contract.".to_string()))),
         "creationCode" => Some((format!("bytes memory type({type_name}).creationCode"), Some("Memory byte array that contains the creation bytecode of the contract.".to_string()))),
@@ -252,7 +267,11 @@ fn type_member_signature_contract(type_name: &str, member: &str) -> Option<(Stri
 }
 
 /// Signature for `string.concat(...)` and `bytes.concat(...)`.
-fn static_type_member_signature(line: &str, dot_pos: usize, member: &str) -> Option<(String, String)> {
+fn static_type_member_signature(
+    line: &str,
+    dot_pos: usize,
+    member: &str,
+) -> Option<(String, String)> {
     // Extract the identifier before the dot.
     let bytes = line.as_bytes();
     let mut pos = dot_pos;
@@ -275,6 +294,118 @@ fn static_type_member_signature(line: &str, dot_pos: usize, member: &str) -> Opt
         }
         _ => None,
     }
+}
+
+// ---------------------------------------------------------------------------
+// ABI information: canonical signature, selector, topic hash, interface ID
+// ---------------------------------------------------------------------------
+
+/// Compute keccak256 hash of a byte slice.
+fn keccak256(data: &[u8]) -> [u8; 32] {
+    use tiny_keccak::{Hasher, Keccak};
+    let mut hasher = Keccak::v256();
+    let mut output = [0u8; 32];
+    hasher.update(data);
+    hasher.finalize(&mut output);
+    output
+}
+
+/// Build the ABI canonical signature for a function/event/error.
+/// E.g. `transfer(address,uint256)` — types only, no names, no spaces after commas.
+fn abi_signature(name: &str, params: &[(String, String)]) -> String {
+    let types: Vec<&str> = params.iter().map(|(ty, _)| canonicalize_type(ty)).collect();
+    format!("{name}({})", types.join(","))
+}
+
+/// Canonicalize a Solidity type for ABI encoding.
+/// Strips `memory`, `storage`, `calldata`; converts `uint`→`uint256`, `int`→`int256`, etc.
+fn canonicalize_type(ty: &str) -> &str {
+    let s = ty
+        .strip_suffix(" memory")
+        .or_else(|| ty.strip_suffix(" storage"))
+        .or_else(|| ty.strip_suffix(" calldata"))
+        .unwrap_or(ty)
+        .trim();
+    // Solidity ABI canonical forms.
+    match s {
+        "uint" => "uint256",
+        "int" => "int256",
+        "byte" => "bytes1",
+        other => other,
+    }
+}
+
+/// Build ABI information string for hover display.
+/// Returns None for declaration kinds that don't have ABI info.
+fn build_abi_info(
+    decl: &crate::symbol_table::Declaration,
+    st: &SymbolTable,
+    file: &Path,
+) -> Option<String> {
+    match decl.kind() {
+        DeclKind::Function => {
+            let params = decl.parameters();
+            let sig = abi_signature(&decl.name, params);
+            let hash = keccak256(sig.as_bytes());
+            let selector = format!("0x{}", hex(&hash[..4]));
+            Some(format!("Selector: `{selector}` | Signature: `{sig}`"))
+        }
+        DeclKind::Event => {
+            let params = decl.parameters();
+            let sig = abi_signature(&decl.name, params);
+            let hash = keccak256(sig.as_bytes());
+            let topic = format!("0x{}", hex(&hash));
+            Some(format!("Topic: `{topic}`\n\nSignature: `{sig}`"))
+        }
+        DeclKind::Error => {
+            let params = decl.parameters();
+            let sig = abi_signature(&decl.name, params);
+            let hash = keccak256(sig.as_bytes());
+            let selector = format!("0x{}", hex(&hash[..4]));
+            Some(format!("Selector: `{selector}` | Signature: `{sig}`"))
+        }
+        DeclKind::Interface => {
+            // ERC-165 interface ID: XOR of all function selectors.
+            let members = st.members_of(&decl.name, file);
+            let mut interface_id: u32 = 0;
+            let mut has_functions = false;
+            for member in members {
+                if member.kind == DeclKind::Function {
+                    // Look up function declaration for its parameters.
+                    if let Some(func_decl) = member
+                        .decl_id
+                        .as_ref()
+                        .and_then(|id| st.get_declaration(id))
+                        .or_else(|| {
+                            // Fall back to scope lookup.
+                            let decl_id = st.find_type_decl(file, &decl.name)?;
+                            let fi = st.files.get(&decl_id.file)?;
+                            let scope = fi.scopes.iter().find(|s| s.owner == Some(decl_id))?;
+                            let func_id = scope.get_decl(&member.name)?;
+                            fi.declarations.get(func_id)
+                        })
+                    {
+                        let sig = abi_signature(&func_decl.name, func_decl.parameters());
+                        let hash = keccak256(sig.as_bytes());
+                        let selector = u32::from_be_bytes([hash[0], hash[1], hash[2], hash[3]]);
+                        interface_id ^= selector;
+                        has_functions = true;
+                    }
+                }
+            }
+            if has_functions {
+                Some(format!("ERC-165 Interface ID: `0x{interface_id:08x}`"))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Format bytes as hex string.
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn build_signature(decl: &crate::symbol_table::Declaration) -> String {

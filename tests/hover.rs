@@ -2232,7 +2232,10 @@ contract Foo {
     let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
 
     let text = hover_text(source, &st, &path, Position::new(line, col));
-    assert!(text.is_some(), "Should show hover on `type` keyword in type(int256)");
+    assert!(
+        text.is_some(),
+        "Should show hover on `type` keyword in type(int256)"
+    );
     let text = text.unwrap();
     assert!(
         text.contains("type(int256)"),
@@ -2263,7 +2266,10 @@ contract Foo {
     let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
 
     let text = hover_text(source, &st, &path, Position::new(line, col));
-    assert!(text.is_some(), "Should show hover on `int256` inside type(int256)");
+    assert!(
+        text.is_some(),
+        "Should show hover on `int256` inside type(int256)"
+    );
     let text = text.unwrap();
     assert!(
         text.contains("type(int256)"),
@@ -2463,5 +2469,101 @@ contract Foo {
     assert!(
         text.contains("Concatenates variable number"),
         "Should show NatSpec doc for bytes.concat, got: {text}"
+    );
+}
+
+// ========== ABI SIGNATURE / SELECTOR / TOPIC / INTERFACE ID TESTS ==========
+
+#[test]
+fn hover_function_shows_abi_selector() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Token {
+    function transfer(address to, uint256 amount) external returns (bool) {
+        return true;
+    }
+}
+"#;
+    let (st, path) = setup(source);
+    // Hover on "transfer"
+    let text = hover_text(source, &st, &path, Position::new(4, 13)).unwrap();
+    // keccak256("transfer(address,uint256)") = 0xa9059cbb...
+    assert!(
+        text.contains("0xa9059cbb"),
+        "Should show function selector 0xa9059cbb, got: {text}"
+    );
+    assert!(
+        text.contains("transfer(address,uint256)"),
+        "Should show ABI canonical signature, got: {text}"
+    );
+}
+
+#[test]
+fn hover_event_shows_topic_hash() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Token {
+    event Transfer(address indexed from, address indexed to, uint256 value);
+}
+"#;
+    let (st, path) = setup(source);
+    // Hover on "Transfer"
+    let text = hover_text(source, &st, &path, Position::new(4, 10)).unwrap();
+    // keccak256("Transfer(address,address,uint256)") = 0xddf252ad...
+    assert!(
+        text.contains("0xddf252ad"),
+        "Should show event topic hash starting with 0xddf252ad, got: {text}"
+    );
+    assert!(
+        text.contains("Transfer(address,address,uint256)"),
+        "Should show ABI canonical signature for event, got: {text}"
+    );
+}
+
+#[test]
+fn hover_error_shows_selector() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Token {
+    error InsufficientBalance(address account, uint256 balance);
+}
+"#;
+    let (st, path) = setup(source);
+    // Hover on "InsufficientBalance"
+    let text = hover_text(source, &st, &path, Position::new(4, 10)).unwrap();
+    assert!(
+        text.contains("InsufficientBalance(address,uint256)"),
+        "Should show ABI canonical signature for error, got: {text}"
+    );
+    assert!(
+        text.contains("Selector: `0x"),
+        "Should show error selector, got: {text}"
+    );
+}
+
+#[test]
+fn hover_interface_shows_erc165_id() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+interface IERC20 {
+    function totalSupply() external view returns (uint256);
+    function balanceOf(address account) external view returns (uint256);
+    function transfer(address to, uint256 amount) external returns (bool);
+    function allowance(address owner, address spender) external view returns (uint256);
+    function approve(address spender, uint256 amount) external returns (bool);
+    function transferFrom(address from, address to, uint256 amount) external returns (bool);
+}
+"#;
+    let (st, path) = setup(source);
+    // Hover on "IERC20"
+    let text = hover_text(source, &st, &path, Position::new(3, 10)).unwrap();
+    // ERC-165 interface ID for IERC20 is 0x36372b07
+    assert!(
+        text.contains("ERC-165 Interface ID: `0x36372b07`"),
+        "Should show correct ERC-165 interface ID for IERC20, got: {text}"
     );
 }
