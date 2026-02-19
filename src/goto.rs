@@ -26,8 +26,8 @@ pub fn goto_definition(
         }
     }
 
-    // Resolve identifier at cursor to its declaration.
-    let decl = st.resolve_at(file, byte_offset)?;
+    // Resolve identifier at cursor to its declaration, with overload disambiguation.
+    let decl = resolve_with_overloads(st, file, source, byte_offset)?;
     let target_path = st.resolve_path(decl.id.file);
 
     // Read the target file source to convert byte offsets to positions.
@@ -198,6 +198,103 @@ fn find_function_implementations(
     }
 
     locations
+}
+
+// ---------------------------------------------------------------------------
+// Overload resolution for go-to-definition
+// ---------------------------------------------------------------------------
+
+/// Resolve a symbol at `byte_offset`, disambiguating overloads by counting
+/// the number of arguments at the call site (if any).
+fn resolve_with_overloads<'a>(
+    st: &'a SymbolTable,
+    file: &Path,
+    source: &str,
+    byte_offset: usize,
+) -> Option<&'a crate::symbol_table::Declaration> {
+    let decl = st.resolve_at(file, byte_offset)?;
+
+    // Only try overload resolution for callable declarations.
+    if !matches!(
+        decl.kind(),
+        DeclKind::Function | DeclKind::Event | DeclKind::Error
+    ) {
+        return Some(decl);
+    }
+
+    let overloads = st.find_overloads(file, byte_offset);
+    if overloads.len() <= 1 {
+        return Some(decl);
+    }
+
+    // Count arguments at the call site by scanning source text.
+    if let Some(arg_count) = count_call_args(source, byte_offset) {
+        // Find the best matching overload by parameter count.
+        // Prefer exact match, then closest with >= params.
+        let mut best = None;
+        let mut best_diff = i32::MAX;
+        for overload in &overloads {
+            let param_count = overload.parameters().len() as i32;
+            let diff = (param_count - arg_count as i32).abs();
+            if diff < best_diff || (diff == best_diff && param_count == arg_count as i32) {
+                best_diff = diff;
+                best = Some(*overload);
+            }
+        }
+        return best.or(Some(decl));
+    }
+
+    Some(decl)
+}
+
+/// Count the number of arguments at a call site by scanning forward from the
+/// identifier at `byte_offset` for the opening `(` and counting commas.
+fn count_call_args(source: &str, byte_offset: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+
+    // Skip past the identifier.
+    let mut pos = byte_offset;
+    while pos < bytes.len() && (bytes[pos].is_ascii_alphanumeric() || bytes[pos] == b'_') {
+        pos += 1;
+    }
+
+    // Skip whitespace.
+    while pos < bytes.len() && bytes[pos].is_ascii_whitespace() {
+        pos += 1;
+    }
+
+    // Must find opening paren.
+    if pos >= bytes.len() || bytes[pos] != b'(' {
+        return None;
+    }
+    pos += 1; // skip '('
+
+    // Count commas at depth 0 to determine argument count.
+    let mut depth: i32 = 1;
+    let mut commas: usize = 0;
+    let mut has_content = false;
+
+    while pos < bytes.len() && depth > 0 {
+        match bytes[pos] {
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            b',' if depth == 1 => commas += 1,
+            b if !b.is_ascii_whitespace() && depth == 1 => has_content = true,
+            _ => {}
+        }
+        pos += 1;
+    }
+
+    if !has_content && commas == 0 {
+        Some(0) // empty argument list
+    } else {
+        Some(commas + 1)
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -556,6 +556,138 @@ contract Factory {
     assert_eq!(loc.range.start.line, 3);
 }
 
+// ========== OVERLOAD RESOLUTION TESTS ==========
+
+#[test]
+fn goto_overloaded_function_one_arg() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Foo {
+    function process(uint256 x) public pure returns (uint256) {
+        return x;
+    }
+
+    function process(uint256 x, uint256 y) public pure returns (uint256) {
+        return x + y;
+    }
+
+    function test() public pure {
+        process(1);
+    }
+}
+"#;
+    let (st, path) = setup(source);
+    let call_pos = source.find("process(1);").unwrap();
+    let line = source[..call_pos].matches('\n').count() as u32;
+    let col = (call_pos - source[..call_pos].rfind('\n').unwrap() - 1) as u32;
+
+    let loc = goto_definition(
+        &st,
+        &path,
+        source,
+        Position::new(line, col),
+        &LineIndex::new(source),
+    );
+    assert!(loc.is_some(), "Should resolve overloaded function call");
+    let loc = loc.unwrap();
+    // The 1-arg overload is on line 4
+    assert_eq!(
+        loc.range.start.line, 4,
+        "Should jump to 1-arg overload (line 4), got line {}",
+        loc.range.start.line
+    );
+}
+
+#[test]
+fn goto_overloaded_function_two_args() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Foo {
+    function process(uint256 x) public pure returns (uint256) {
+        return x;
+    }
+
+    function process(uint256 x, uint256 y) public pure returns (uint256) {
+        return x + y;
+    }
+
+    function test() public pure {
+        process(1, 2);
+    }
+}
+"#;
+    let (st, path) = setup(source);
+    let call_pos = source.find("process(1, 2);").unwrap();
+    let line = source[..call_pos].matches('\n').count() as u32;
+    let col = (call_pos - source[..call_pos].rfind('\n').unwrap() - 1) as u32;
+
+    let loc = goto_definition(
+        &st,
+        &path,
+        source,
+        Position::new(line, col),
+        &LineIndex::new(source),
+    );
+    assert!(
+        loc.is_some(),
+        "Should resolve 2-arg overloaded function call"
+    );
+    let loc = loc.unwrap();
+    // The 2-arg overload is on line 8
+    assert_eq!(
+        loc.range.start.line, 8,
+        "Should jump to 2-arg overload (line 8), got line {}",
+        loc.range.start.line
+    );
+}
+
+#[test]
+fn goto_overloaded_function_three_overloads() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Foo {
+    function calc() public pure returns (uint256) {
+        return 0;
+    }
+
+    function calc(uint256 x) public pure returns (uint256) {
+        return x;
+    }
+
+    function calc(uint256 x, uint256 y) public pure returns (uint256) {
+        return x + y;
+    }
+
+    function test() public pure {
+        calc(10, 20);
+    }
+}
+"#;
+    let (st, path) = setup(source);
+    let call_pos = source.find("calc(10, 20);").unwrap();
+    let line = source[..call_pos].matches('\n').count() as u32;
+    let col = (call_pos - source[..call_pos].rfind('\n').unwrap() - 1) as u32;
+
+    let loc = goto_definition(
+        &st,
+        &path,
+        source,
+        Position::new(line, col),
+        &LineIndex::new(source),
+    );
+    assert!(loc.is_some(), "Should resolve 2-arg overloaded calc call");
+    let loc = loc.unwrap();
+    // The 2-arg overload is on line 12
+    assert_eq!(
+        loc.range.start.line, 12,
+        "Should jump to 2-arg calc overload (line 12), got line {}",
+        loc.range.start.line
+    );
+}
+
 #[test]
 fn goto_for_loop_variable_to_declaration() {
     let source = r#"// SPDX-License-Identifier: MIT

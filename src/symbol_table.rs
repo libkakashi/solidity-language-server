@@ -24,45 +24,150 @@ pub const BUILTIN_GLOBALS: BuiltinDef = &[
         "msg",
         SYNTHETIC_BASE,
         &[
-            ("data", "bytes calldata", SYNTHETIC_BASE + 1, "Complete calldata."),
-            ("sender", "address", SYNTHETIC_BASE + 2, "Sender of the message (current call)."),
-            ("sig", "bytes4", SYNTHETIC_BASE + 3, "First four bytes of the calldata (i.e. function identifier)."),
-            ("value", "uint256", SYNTHETIC_BASE + 4, "Number of wei sent with the message."),
+            (
+                "data",
+                "bytes calldata",
+                SYNTHETIC_BASE + 1,
+                "Complete calldata.",
+            ),
+            (
+                "sender",
+                "address",
+                SYNTHETIC_BASE + 2,
+                "Sender of the message (current call).",
+            ),
+            (
+                "sig",
+                "bytes4",
+                SYNTHETIC_BASE + 3,
+                "First four bytes of the calldata (i.e. function identifier).",
+            ),
+            (
+                "value",
+                "uint256",
+                SYNTHETIC_BASE + 4,
+                "Number of wei sent with the message.",
+            ),
         ],
     ),
     (
         "block",
         SYNTHETIC_BASE + 10,
         &[
-            ("basefee", "uint256", SYNTHETIC_BASE + 11, "Current block's base fee (EIP-3198 and EIP-1559)."),
-            ("blobbasefee", "uint256", SYNTHETIC_BASE + 12, "Current block's blob base fee (EIP-7516 and EIP-4844)."),
-            ("chainid", "uint256", SYNTHETIC_BASE + 13, "Current chain id."),
-            ("coinbase", "address payable", SYNTHETIC_BASE + 14, "Current block miner's address."),
-            ("difficulty", "uint256", SYNTHETIC_BASE + 15, "Current block difficulty. Deprecated in favor of prevrandao post-merge (EVM >= Paris)."),
-            ("gaslimit", "uint256", SYNTHETIC_BASE + 16, "Current block gaslimit."),
-            ("number", "uint256", SYNTHETIC_BASE + 17, "Current block number."),
-            ("prevrandao", "uint256", SYNTHETIC_BASE + 18, "Random number provided by the beacon chain (EVM >= Paris)."),
-            ("timestamp", "uint256", SYNTHETIC_BASE + 19, "Current block timestamp as seconds since Unix epoch."),
+            (
+                "basefee",
+                "uint256",
+                SYNTHETIC_BASE + 11,
+                "Current block's base fee (EIP-3198 and EIP-1559).",
+            ),
+            (
+                "blobbasefee",
+                "uint256",
+                SYNTHETIC_BASE + 12,
+                "Current block's blob base fee (EIP-7516 and EIP-4844).",
+            ),
+            (
+                "chainid",
+                "uint256",
+                SYNTHETIC_BASE + 13,
+                "Current chain id.",
+            ),
+            (
+                "coinbase",
+                "address payable",
+                SYNTHETIC_BASE + 14,
+                "Current block miner's address.",
+            ),
+            (
+                "difficulty",
+                "uint256",
+                SYNTHETIC_BASE + 15,
+                "Current block difficulty. Deprecated in favor of prevrandao post-merge (EVM >= Paris).",
+            ),
+            (
+                "gaslimit",
+                "uint256",
+                SYNTHETIC_BASE + 16,
+                "Current block gaslimit.",
+            ),
+            (
+                "number",
+                "uint256",
+                SYNTHETIC_BASE + 17,
+                "Current block number.",
+            ),
+            (
+                "prevrandao",
+                "uint256",
+                SYNTHETIC_BASE + 18,
+                "Random number provided by the beacon chain (EVM >= Paris).",
+            ),
+            (
+                "timestamp",
+                "uint256",
+                SYNTHETIC_BASE + 19,
+                "Current block timestamp as seconds since Unix epoch.",
+            ),
         ],
     ),
     (
         "tx",
         SYNTHETIC_BASE + 30,
         &[
-            ("gasprice", "uint256", SYNTHETIC_BASE + 31, "Gas price of the transaction."),
-            ("origin", "address", SYNTHETIC_BASE + 32, "Sender of the transaction (full call chain)."),
+            (
+                "gasprice",
+                "uint256",
+                SYNTHETIC_BASE + 31,
+                "Gas price of the transaction.",
+            ),
+            (
+                "origin",
+                "address",
+                SYNTHETIC_BASE + 32,
+                "Sender of the transaction (full call chain).",
+            ),
         ],
     ),
     (
         "abi",
         SYNTHETIC_BASE + 40,
         &[
-            ("decode", "function(bytes memory, (...)) returns (...)", SYNTHETIC_BASE + 41, "ABI-decodes the given data, while the types are given in parentheses as second argument."),
-            ("encode", "function(...) returns (bytes memory)", SYNTHETIC_BASE + 42, "ABI-encodes the given arguments."),
-            ("encodePacked", "function(...) returns (bytes memory)", SYNTHETIC_BASE + 43, "Performs packed encoding of the given arguments. Note that packed encoding can be ambiguous!"),
-            ("encodeWithSelector", "function(bytes4, ...) returns (bytes memory)", SYNTHETIC_BASE + 44, "ABI-encodes the given arguments starting from the second and prepends the given four-byte selector."),
-            ("encodeWithSignature", "function(string memory, ...) returns (bytes memory)", SYNTHETIC_BASE + 45, "Equivalent to abi.encodeWithSelector(bytes4(keccak256(bytes(signature))), ...)."),
-            ("encodeCall", "function(function, (...)) returns (bytes memory)", SYNTHETIC_BASE + 46, "ABI-encodes a call to functionPointer with the arguments found in the tuple. Performs a full type-check, ensuring the types match the function signature."),
+            (
+                "decode",
+                "function(bytes memory, (...)) returns (...)",
+                SYNTHETIC_BASE + 41,
+                "ABI-decodes the given data, while the types are given in parentheses as second argument.",
+            ),
+            (
+                "encode",
+                "function(...) returns (bytes memory)",
+                SYNTHETIC_BASE + 42,
+                "ABI-encodes the given arguments.",
+            ),
+            (
+                "encodePacked",
+                "function(...) returns (bytes memory)",
+                SYNTHETIC_BASE + 43,
+                "Performs packed encoding of the given arguments. Note that packed encoding can be ambiguous!",
+            ),
+            (
+                "encodeWithSelector",
+                "function(bytes4, ...) returns (bytes memory)",
+                SYNTHETIC_BASE + 44,
+                "ABI-encodes the given arguments starting from the second and prepends the given four-byte selector.",
+            ),
+            (
+                "encodeWithSignature",
+                "function(string memory, ...) returns (bytes memory)",
+                SYNTHETIC_BASE + 45,
+                "Equivalent to abi.encodeWithSelector(bytes4(keccak256(bytes(signature))), ...).",
+            ),
+            (
+                "encodeCall",
+                "function(function, (...)) returns (bytes memory)",
+                SYNTHETIC_BASE + 46,
+                "ABI-encodes a call to functionPointer with the arguments found in the tuple. Performs a full type-check, ensuring the types match the function signature.",
+            ),
         ],
     ),
 ];
@@ -74,23 +179,78 @@ pub const BUILTIN_TYPES: BuiltinDef = &[
         "address",
         SYNTHETIC_BASE + 100,
         &[
-            ("balance", "uint256", SYNTHETIC_BASE + 101, "Balance of the address in wei."),
-            ("code", "bytes memory", SYNTHETIC_BASE + 102, "Code at the address (can be empty)."),
-            ("codehash", "bytes32", SYNTHETIC_BASE + 103, "The codehash of the address."),
-            ("transfer", "function(uint256)", SYNTHETIC_BASE + 104, "Send given amount of wei to address, reverts on failure, forwards 2300 gas stipend, not adjustable."),
-            ("send", "function(uint256) returns (bool)", SYNTHETIC_BASE + 105, "Send given amount of wei to address, returns false on failure, forwards 2300 gas stipend, not adjustable."),
-            ("call", "function(bytes memory) returns (bool, bytes memory)", SYNTHETIC_BASE + 106, "Issue low-level CALL with the given payload, returns success condition and return data, forwards all available gas, adjustable."),
-            ("delegatecall", "function(bytes memory) returns (bool, bytes memory)", SYNTHETIC_BASE + 107, "Issue low-level DELEGATECALL with the given payload, returns success condition and return data, forwards all available gas, adjustable."),
-            ("staticcall", "function(bytes memory) returns (bool, bytes memory)", SYNTHETIC_BASE + 108, "Issue low-level STATICCALL with the given payload, returns success condition and return data, forwards all available gas, adjustable."),
+            (
+                "balance",
+                "uint256",
+                SYNTHETIC_BASE + 101,
+                "Balance of the address in wei.",
+            ),
+            (
+                "code",
+                "bytes memory",
+                SYNTHETIC_BASE + 102,
+                "Code at the address (can be empty).",
+            ),
+            (
+                "codehash",
+                "bytes32",
+                SYNTHETIC_BASE + 103,
+                "The codehash of the address.",
+            ),
+            (
+                "transfer",
+                "function(uint256)",
+                SYNTHETIC_BASE + 104,
+                "Send given amount of wei to address, reverts on failure, forwards 2300 gas stipend, not adjustable.",
+            ),
+            (
+                "send",
+                "function(uint256) returns (bool)",
+                SYNTHETIC_BASE + 105,
+                "Send given amount of wei to address, returns false on failure, forwards 2300 gas stipend, not adjustable.",
+            ),
+            (
+                "call",
+                "function(bytes memory) returns (bool, bytes memory)",
+                SYNTHETIC_BASE + 106,
+                "Issue low-level CALL with the given payload, returns success condition and return data, forwards all available gas, adjustable.",
+            ),
+            (
+                "delegatecall",
+                "function(bytes memory) returns (bool, bytes memory)",
+                SYNTHETIC_BASE + 107,
+                "Issue low-level DELEGATECALL with the given payload, returns success condition and return data, forwards all available gas, adjustable.",
+            ),
+            (
+                "staticcall",
+                "function(bytes memory) returns (bool, bytes memory)",
+                SYNTHETIC_BASE + 108,
+                "Issue low-level STATICCALL with the given payload, returns success condition and return data, forwards all available gas, adjustable.",
+            ),
         ],
     ),
     (
         "__builtin_array",
         SYNTHETIC_BASE + 200,
         &[
-            ("length", "uint256", SYNTHETIC_BASE + 201, "The number of elements in the array."),
-            ("push", "function", SYNTHETIC_BASE + 202, "Appends a zero-initialized element at the end of the array and returns a reference to the element."),
-            ("pop", "function", SYNTHETIC_BASE + 203, "Removes the last element from the array."),
+            (
+                "length",
+                "uint256",
+                SYNTHETIC_BASE + 201,
+                "The number of elements in the array.",
+            ),
+            (
+                "push",
+                "function",
+                SYNTHETIC_BASE + 202,
+                "Appends a zero-initialized element at the end of the array and returns a reference to the element.",
+            ),
+            (
+                "pop",
+                "function",
+                SYNTHETIC_BASE + 203,
+                "Removes the last element from the array.",
+            ),
         ],
     ),
 ];
@@ -456,6 +616,15 @@ impl Scope {
             .find(|(n, _)| n == name)
             .map(|(_, id)| id)
     }
+
+    /// Return all declarations with the given name (supports overloaded functions).
+    pub fn get_all_decls(&self, name: &str) -> Vec<DeclId> {
+        self.declarations
+            .iter()
+            .filter(|(n, _)| n == name)
+            .map(|(_, id)| *id)
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -759,6 +928,134 @@ impl SymbolTable {
         }
 
         None
+    }
+
+    /// Find all overloaded declarations with the given name visible from the
+    /// scope that contains the reference at `byte_offset`.
+    pub fn find_overloads(&self, path: &Path, byte_offset: usize) -> Vec<&Declaration> {
+        let file_id = match self.interner.lookup(path) {
+            Some(id) => id,
+            None => return vec![],
+        };
+        let fi = match self.files.get(&file_id) {
+            Some(fi) => fi,
+            None => return vec![],
+        };
+
+        // Determine the name being referenced.
+        let name = {
+            let source = match self.sources.get(&file_id) {
+                Some(s) => s,
+                None => return vec![],
+            };
+            // Check declaration name ranges first.
+            let bo = byte_offset;
+            let di = fi
+                .decl_name_ranges
+                .partition_point(|&(start, _, _)| start <= bo);
+            if di > 0 {
+                let (start, end, _) = fi.decl_name_ranges[di - 1];
+                if start <= bo && bo < end {
+                    source[start..end].to_string()
+                } else {
+                    // Check reference ranges.
+                    let bo32 = bo as u32;
+                    let ri = fi
+                        .ref_range_index
+                        .partition_point(|&i| fi.references[i as usize].range.0 <= bo32);
+                    if ri > 0 {
+                        let ref_idx = fi.ref_range_index[ri - 1] as usize;
+                        let reference = &fi.references[ref_idx];
+                        if reference.range.0 <= bo32 && bo32 < reference.range.1 {
+                            source[reference.range.0 as usize..reference.range.1 as usize]
+                                .to_string()
+                        } else {
+                            return vec![];
+                        }
+                    } else {
+                        return vec![];
+                    }
+                }
+            } else {
+                return vec![];
+            }
+        };
+
+        // Find the scope at the byte offset.
+        let scope_id = match find_scope_at(fi, byte_offset) {
+            Some(id) => id,
+            None => return vec![],
+        };
+
+        // Walk up scopes collecting all declarations with this name.
+        let mut result = Vec::new();
+        let mut seen = FxHashSet::default();
+        let mut current = Some(scope_id);
+        while let Some(sid) = current {
+            if let Some(scope) = fi.scopes.get(sid) {
+                for decl_id in scope.get_all_decls(&name) {
+                    if seen.insert(decl_id) {
+                        if let Some(decl) = fi.declarations.get(&decl_id) {
+                            result.push(decl);
+                        }
+                    }
+                }
+                // Also check inherited base contracts at contract scope.
+                if matches!(scope.kind, ScopeKind::Contract | ScopeKind::Interface) {
+                    if let Some(owner_decl) = scope.owner.and_then(|id| fi.declarations.get(&id)) {
+                        for base_name in owner_decl.base_contracts() {
+                            self.collect_overloads_in_base(
+                                file_id,
+                                base_name,
+                                &name,
+                                &mut seen,
+                                &mut result,
+                            );
+                        }
+                    }
+                }
+                current = scope.parent;
+            } else {
+                break;
+            }
+        }
+
+        result
+    }
+
+    /// Collect all overloaded declarations with `func_name` from a base contract (recursive).
+    fn collect_overloads_in_base<'a>(
+        &'a self,
+        origin_file: FileId,
+        base_name: &str,
+        func_name: &str,
+        seen: &mut FxHashSet<DeclId>,
+        result: &mut Vec<&'a Declaration>,
+    ) {
+        let origin_path = self.interner.resolve(origin_file);
+        let decl_id = match self.find_type_decl(origin_path, base_name) {
+            Some(id) => id,
+            None => return,
+        };
+        let fi = match self.files.get(&decl_id.file) {
+            Some(fi) => fi,
+            None => return,
+        };
+        if let Some(scope) = fi.scopes.iter().find(|s| s.owner == Some(decl_id)) {
+            for id in scope.get_all_decls(func_name) {
+                if seen.insert(id) {
+                    if let Some(decl) = fi.declarations.get(&id) {
+                        result.push(decl);
+                    }
+                }
+            }
+        }
+        // Recurse into base contracts of the base.
+        if let Some(base_decl) = self.get_declaration(&decl_id) {
+            for grandbase in base_decl.base_contracts() {
+                self.collect_overloads_in_base(decl_id.file, grandbase, func_name, seen, result);
+            }
+        }
     }
 
     /// Get a declaration by its DeclId.
@@ -2352,7 +2649,11 @@ fn inject_builtin_globals(fi: &mut FileIndex) {
                     is_constant: false,
                     is_immutable: false,
                 }),
-                natspec: if mdoc.is_empty() { None } else { Some(mdoc.to_string()) },
+                natspec: if mdoc.is_empty() {
+                    None
+                } else {
+                    Some(mdoc.to_string())
+                },
             };
             fi.declarations.insert(member_decl_id, member_decl);
             members.push(MemberInfo {
@@ -2406,7 +2707,11 @@ fn inject_builtin_defs(fi: &mut FileIndex, defs: BuiltinDef, register_scope: boo
                     is_constant: false,
                     is_immutable: false,
                 }),
-                natspec: if mdoc.is_empty() { None } else { Some(mdoc.to_string()) },
+                natspec: if mdoc.is_empty() {
+                    None
+                } else {
+                    Some(mdoc.to_string())
+                },
             };
             fi.declarations.insert(member_decl_id, member_decl);
             members.push(MemberInfo {

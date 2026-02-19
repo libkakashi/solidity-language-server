@@ -32,47 +32,56 @@ pub fn signature_help(
     // Resolve the callee to a declaration.
     let decl = resolve_callee(st, file, source, &call_site)?;
     let params = decl.parameters();
-    if params.is_empty() {
+    if params.is_empty() && st.find_overloads(file, call_site.callee.start_byte()).len() <= 1 {
         return None;
     }
 
-    // Build the signature label and parameter label ranges.
-    let (label, param_labels) = build_label(decl);
+    // Collect all overloads for this function name.
+    let overloads = st.find_overloads(file, call_site.callee.start_byte());
 
-    let parameters: Vec<ParameterInformation> = param_labels
-        .into_iter()
-        .map(|(start, end)| {
-            // Convert byte offsets into the label string to the negotiated
-            // position encoding (UTF-16 or UTF-8) for LabelOffsets.
-            let enc_start = encoding_offset(&label, start);
-            let enc_end = encoding_offset(&label, end);
-            ParameterInformation {
-                label: ParameterLabel::LabelOffsets([enc_start, enc_end]),
-                documentation: None,
+    let mut signatures: Vec<SignatureInformation> = Vec::new();
+    let mut active_signature: u32 = 0;
+
+    if overloads.len() > 1 {
+        // Multiple overloads: build a signature for each, pick best match.
+        for (i, overload) in overloads.iter().enumerate() {
+            let sig = build_signature_info(overload, active_param);
+            // Best match: the overload whose parameter count best fits.
+            let param_count = overload.parameters().len() as u32;
+            if param_count > active_param
+                && (signatures.is_empty()
+                    || param_count < overloads[active_signature as usize].parameters().len() as u32)
+            {
+                active_signature = i as u32;
             }
-        })
-        .collect();
-
-    // Attach NatSpec per-parameter documentation if available.
-    let parameters = attach_param_docs(parameters, decl);
-
-    let documentation = decl.natspec().map(|ns| {
-        Documentation::MarkupContent(MarkupContent {
-            kind: MarkupKind::Markdown,
-            value: format_natspec(ns),
-        })
-    });
-
-    let sig = SignatureInformation {
-        label,
-        documentation,
-        parameters: Some(parameters),
-        active_parameter: Some(active_param),
-    };
+            signatures.push(sig);
+        }
+        // If no overload fits (active_param >= all param counts), pick the one
+        // with the most parameters.
+        if active_param > 0
+            && overloads
+                .get(active_signature as usize)
+                .map_or(true, |d| (d.parameters().len() as u32) <= active_param)
+        {
+            if let Some((i, _)) = overloads
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, d)| d.parameters().len())
+            {
+                active_signature = i as u32;
+            }
+        }
+    } else {
+        // Single function (no overloads or only one match).
+        if params.is_empty() {
+            return None;
+        }
+        signatures.push(build_signature_info(decl, active_param));
+    }
 
     Some(SignatureHelp {
-        signatures: vec![sig],
-        active_signature: Some(0),
+        signatures,
+        active_signature: Some(active_signature),
         active_parameter: Some(active_param),
     })
 }
@@ -339,6 +348,39 @@ fn resolve_callee<'a>(
 // ---------------------------------------------------------------------------
 // Signature label building
 // ---------------------------------------------------------------------------
+
+/// Build a complete `SignatureInformation` for a single declaration.
+fn build_signature_info(decl: &Declaration, active_param: u32) -> SignatureInformation {
+    let (label, param_labels) = build_label(decl);
+
+    let parameters: Vec<ParameterInformation> = param_labels
+        .into_iter()
+        .map(|(start, end)| {
+            let enc_start = encoding_offset(&label, start);
+            let enc_end = encoding_offset(&label, end);
+            ParameterInformation {
+                label: ParameterLabel::LabelOffsets([enc_start, enc_end]),
+                documentation: None,
+            }
+        })
+        .collect();
+
+    let parameters = attach_param_docs(parameters, decl);
+
+    let documentation = decl.natspec().map(|ns| {
+        Documentation::MarkupContent(MarkupContent {
+            kind: MarkupKind::Markdown,
+            value: format_natspec(ns),
+        })
+    });
+
+    SignatureInformation {
+        label,
+        documentation,
+        parameters: Some(parameters),
+        active_parameter: Some(active_param),
+    }
+}
 
 /// Build the full signature label string and byte offset ranges for each parameter.
 /// Returns (label, Vec<(start_offset, end_offset)>) where offsets are in the label string.

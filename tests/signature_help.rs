@@ -1812,7 +1812,9 @@ contract Token {
 }
 "#;
     // Place cursor after the second comma, on the third argument
-    let emit_call = source.find("Transfer(msg.sender, recipient, amount)").unwrap();
+    let emit_call = source
+        .find("Transfer(msg.sender, recipient, amount)")
+        .unwrap();
     let after_second_comma = emit_call + "Transfer(msg.sender, recipient, ".len();
     let help = sig_at(source, after_second_comma);
     assert!(
@@ -1859,5 +1861,116 @@ contract Vault {
         active, 1,
         "Active parameter should be 1 (second param 'required') after comma, got {}",
         active
+    );
+}
+
+// ========== OVERLOAD RESOLUTION TESTS ==========
+
+#[test]
+fn overloaded_function_shows_multiple_signatures() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Foo {
+    function process(uint256 x) public pure returns (uint256) {
+        return x;
+    }
+
+    function process(uint256 x, uint256 y) public pure returns (uint256) {
+        return x + y;
+    }
+
+    function test() public pure {
+        process(1, 2);
+    }
+}
+"#;
+    let call = source.find("process(1, 2)").unwrap();
+    let open = call + "process(".len();
+    let help = sig_at(source, open);
+    assert!(
+        help.is_some(),
+        "Should provide signature help for overloaded function"
+    );
+    let help = help.unwrap();
+    assert!(
+        help.signatures.len() >= 2,
+        "Should show at least 2 overload signatures, got {}",
+        help.signatures.len()
+    );
+}
+
+#[test]
+fn overloaded_function_active_signature_matches_arg_count() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Foo {
+    function calc(uint256 x) public pure returns (uint256) {
+        return x;
+    }
+
+    function calc(uint256 x, uint256 y) public pure returns (uint256) {
+        return x + y;
+    }
+
+    function test() public pure {
+        calc(1, 2);
+    }
+}
+"#;
+    let call = source.find("calc(1, 2)").unwrap();
+    // Cursor after first comma — active_param = 1, so 2 args
+    let after_comma = source[call..].find(", 2").unwrap() + call + 2;
+    let help = sig_at(source, after_comma);
+    assert!(help.is_some(), "Should provide signature help");
+    let help = help.unwrap();
+    if help.signatures.len() >= 2 {
+        let active_idx = help.active_signature.unwrap_or(0) as usize;
+        let active_sig = &help.signatures[active_idx];
+        let param_count = active_sig.parameters.as_ref().map_or(0, |p| p.len());
+        assert_eq!(
+            param_count, 2,
+            "Active signature should be the 2-param overload, got {} params",
+            param_count
+        );
+    }
+}
+
+#[test]
+fn overloaded_function_three_overloads_shows_all() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Foo {
+    function run() public pure returns (uint256) {
+        return 0;
+    }
+
+    function run(uint256 x) public pure returns (uint256) {
+        return x;
+    }
+
+    function run(uint256 x, uint256 y) public pure returns (uint256) {
+        return x + y;
+    }
+
+    function test() public pure {
+        run(1);
+    }
+}
+"#;
+    let call = source.find("run(1)").unwrap();
+    let open = call + "run(".len();
+    let help = sig_at(source, open);
+    assert!(
+        help.is_some(),
+        "Should provide signature help for 3-overload function"
+    );
+    let help = help.unwrap();
+    assert!(
+        help.signatures.len() >= 2,
+        "Should show at least 2 signatures for overloaded function, got {}",
+        help.signatures.len()
     );
 }
