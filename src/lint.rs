@@ -436,6 +436,48 @@ fn filter_unsafe_cheatcode(
     })
 }
 
+fn filter_missing_zero_check(
+    _rule: &LintRule,
+    source: &str,
+    captures: &[(&str, Node)],
+) -> Option<LintHit> {
+    let type_node = find_capture(captures, "type")?;
+    let param_node = find_capture(captures, "param")?;
+    let body_node = find_capture(captures, "body")?;
+    let func_node = find_capture(captures, "func")?;
+
+    // Only check address parameters.
+    let type_text = node_text(type_node, source);
+    if type_text != "address" && type_text != "address payable" {
+        return None;
+    }
+
+    // Only check external/public functions (not internal/private helpers).
+    let func_text = node_text(func_node, source);
+    if !func_text.contains("external") && !func_text.contains("public") {
+        return None;
+    }
+
+    let param_name = node_text(param_node, source);
+    let body_text = node_text(body_node, source);
+
+    // Check if the body contains a zero-address check for this parameter.
+    // Common patterns: require(param != address(0)), if (param == address(0)) revert
+    if body_text.contains(&format!("{param_name} != address(0)"))
+        || body_text.contains(&format!("{param_name} == address(0)"))
+        || body_text.contains(&format!("{param_name} != address(0x0)"))
+        || body_text.contains(&format!("{param_name} == address(0x0)"))
+    {
+        return None;
+    }
+
+    Some(LintHit {
+        start_byte: param_node.start_byte(),
+        end_byte: param_node.end_byte(),
+        message: format!("address parameter `{param_name}` is not checked against zero address"),
+    })
+}
+
 fn filter_custom_errors(
     _rule: &LintRule,
     _source: &str,
@@ -698,6 +740,99 @@ pub fn check_dead_code(
 }
 
 // ---------------------------------------------------------------------------
+// State variable shadowing detection (symbol-table-aware)
+// ---------------------------------------------------------------------------
+
+/// Detect state variables that shadow inherited variables from base contracts.
+pub fn check_state_var_shadowing(
+    st: &crate::symbol_table::SymbolTable,
+    file: &std::path::Path,
+    source: &str,
+    line_index: &crate::utils::LineIndex,
+) -> Vec<Diagnostic> {
+    use crate::symbol_table::{DeclKind, SYNTHETIC_BASE};
+
+    let file_id = match st.lookup_file_id(file) {
+        Some(id) => id,
+        None => return vec![],
+    };
+    let fi = match st.files.get(&file_id) {
+        Some(fi) => fi,
+        None => return vec![],
+    };
+
+    let mut diagnostics = Vec::new();
+
+    // For each contract/interface, check if its state variables shadow base ones.
+    for decl in fi.declarations.values() {
+        if decl.id.byte_offset >= SYNTHETIC_BASE {
+            continue;
+        }
+        if !matches!(decl.kind(), DeclKind::Contract | DeclKind::Library) {
+            continue;
+        }
+
+        let bases = decl.base_contracts();
+        if bases.is_empty() {
+            continue;
+        }
+
+        // Collect all member names from base contracts.
+        let mut base_vars: Vec<(String, String)> = Vec::new(); // (var_name, base_name)
+        for base_name in bases {
+            let members = st.all_members_of(base_name, file);
+            for member in &members {
+                if member.kind == DeclKind::StateVariable {
+                    base_vars.push((member.name.clone(), base_name.to_string()));
+                }
+            }
+        }
+
+        if base_vars.is_empty() {
+            continue;
+        }
+
+        // Find the scope owned by this contract.
+        let contract_scope = fi.scopes.iter().find(|s| s.owner == Some(decl.id));
+        let contract_scope = match contract_scope {
+            Some(s) => s,
+            None => continue,
+        };
+
+        // Check each state variable in this contract against base vars.
+        for (name, child_id) in &contract_scope.declarations {
+            if let Some(child_decl) = fi.declarations.get(child_id) {
+                if child_decl.kind() != DeclKind::StateVariable {
+                    continue;
+                }
+                for (base_var, base_name) in &base_vars {
+                    if name == base_var {
+                        diagnostics.push(Diagnostic {
+                            range: line_index.byte_range_to_lsp_range(
+                                source,
+                                child_decl.name_range.0,
+                                child_decl.name_range.1,
+                            ),
+                            severity: Some(DiagnosticSeverity::WARNING),
+                            code: Some(NumberOrString::String(
+                                "state-var-shadowing".to_string(),
+                            )),
+                            source: Some("ts-lint".into()),
+                            message: format!(
+                                "[lint] state variable `{name}` shadows inherited variable from `{base_name}`"
+                            ),
+                            ..Default::default()
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    diagnostics
+}
+
+// ---------------------------------------------------------------------------
 // Rule registration
 // ---------------------------------------------------------------------------
 
@@ -830,6 +965,25 @@ fn build_rules(lang: &tree_sitter::Language) -> Vec<LintRule> {
         include_str!("queries/unsafe_cheatcode.scm"),
         "call",
         Some(filter_unsafe_cheatcode)
+    );
+
+    // SECURITY
+    add_rule!(
+        "tx-origin",
+        "avoid using tx.origin for authorization",
+        DiagnosticSeverity::WARNING,
+        include_str!("queries/tx_origin.scm"),
+        "expr",
+        None
+    );
+
+    add_rule!(
+        "missing-zero-check",
+        "address parameter not checked against zero address",
+        DiagnosticSeverity::INFORMATION,
+        include_str!("queries/missing_zero_check.scm"),
+        "param",
+        Some(filter_missing_zero_check)
     );
 
     // GAS
@@ -1254,6 +1408,221 @@ contract Foo {
         assert!(
             !ids.iter().any(|id| id == "dead-code"),
             "public state variables should not be flagged, got: {ids:?}"
+        );
+    }
+
+    #[test]
+    fn test_tx_origin_flagged() {
+        let source = r#"
+contract Foo {
+    function bar() public view returns (address) {
+        return tx.origin;
+    }
+}
+"#;
+        let ids = lint_ids(source);
+        assert!(
+            ids.contains(&"tx-origin".to_string()),
+            "should flag tx.origin usage, got: {ids:?}"
+        );
+    }
+
+    #[test]
+    fn test_tx_origin_in_require_flagged() {
+        let source = r#"
+contract Foo {
+    function bar() public view {
+        require(msg.sender == tx.origin, "not EOA");
+    }
+}
+"#;
+        let ids = lint_ids(source);
+        assert!(
+            ids.contains(&"tx-origin".to_string()),
+            "should flag tx.origin in require, got: {ids:?}"
+        );
+    }
+
+    // Missing zero-address check tests
+
+    #[test]
+    fn test_missing_zero_check_flagged() {
+        let source = r#"
+contract Foo {
+    function setOwner(address newOwner) external {
+        // no check
+    }
+}
+"#;
+        let ids = lint_ids(source);
+        assert!(
+            ids.contains(&"missing-zero-check".to_string()),
+            "should flag unchecked address param, got: {ids:?}"
+        );
+    }
+
+    #[test]
+    fn test_missing_zero_check_not_flagged_when_checked() {
+        let source = r#"
+contract Foo {
+    function setOwner(address newOwner) external {
+        require(newOwner != address(0), "zero");
+    }
+}
+"#;
+        let ids = lint_ids(source);
+        assert!(
+            !ids.contains(&"missing-zero-check".to_string()),
+            "should not flag when zero check exists, got: {ids:?}"
+        );
+    }
+
+    #[test]
+    fn test_missing_zero_check_internal_not_flagged() {
+        let source = r#"
+contract Foo {
+    function _setOwner(address newOwner) internal {
+    }
+}
+"#;
+        let ids = lint_ids(source);
+        assert!(
+            !ids.contains(&"missing-zero-check".to_string()),
+            "should not flag internal function address params, got: {ids:?}"
+        );
+    }
+
+    #[test]
+    fn test_missing_zero_check_non_address_not_flagged() {
+        let source = r#"
+contract Foo {
+    function process(uint256 amount) external {
+    }
+}
+"#;
+        let ids = lint_ids(source);
+        assert!(
+            !ids.contains(&"missing-zero-check".to_string()),
+            "should not flag non-address params, got: {ids:?}"
+        );
+    }
+
+    // State variable shadowing tests
+
+    fn shadowing_ids(source: &str) -> Vec<String> {
+        let mut parser = TsParser::new();
+        let path = std::path::PathBuf::from("/tmp/test.sol");
+        let resolver =
+            crate::import_resolver::ImportResolver::with_root(std::path::PathBuf::from("/tmp"));
+        let mut st = crate::symbol_table::SymbolTable::new(resolver);
+        st.index_file(&path, source, &mut parser);
+        st.resolve_file_references(&path, &mut parser);
+        let line_index = crate::utils::LineIndex::new(source);
+        super::check_state_var_shadowing(&st, &path, source, &line_index)
+            .into_iter()
+            .filter_map(|d| {
+                d.code.map(|c| match c {
+                    NumberOrString::String(s) => s,
+                    NumberOrString::Number(n) => n.to_string(),
+                })
+            })
+            .collect()
+    }
+
+    fn shadowing_messages(source: &str) -> Vec<String> {
+        let mut parser = TsParser::new();
+        let path = std::path::PathBuf::from("/tmp/test.sol");
+        let resolver =
+            crate::import_resolver::ImportResolver::with_root(std::path::PathBuf::from("/tmp"));
+        let mut st = crate::symbol_table::SymbolTable::new(resolver);
+        st.index_file(&path, source, &mut parser);
+        st.resolve_file_references(&path, &mut parser);
+        let line_index = crate::utils::LineIndex::new(source);
+        super::check_state_var_shadowing(&st, &path, source, &line_index)
+            .into_iter()
+            .map(|d| d.message)
+            .collect()
+    }
+
+    #[test]
+    fn test_state_var_shadowing_flagged() {
+        let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Base {
+    uint256 public value;
+}
+
+contract Child is Base {
+    uint256 public value;
+}
+"#;
+        let ids = shadowing_ids(source);
+        assert!(
+            ids.contains(&"state-var-shadowing".to_string()),
+            "should flag shadowed state variable, got: {ids:?}"
+        );
+        let msgs = shadowing_messages(source);
+        assert!(
+            msgs.iter()
+                .any(|m| m.contains("value") && m.contains("Base")),
+            "should mention variable name and base contract, got: {msgs:?}"
+        );
+    }
+
+    #[test]
+    fn test_state_var_shadowing_not_flagged_different_name() {
+        let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Base {
+    uint256 public value;
+}
+
+contract Child is Base {
+    uint256 public otherValue;
+}
+"#;
+        let ids = shadowing_ids(source);
+        assert!(
+            !ids.contains(&"state-var-shadowing".to_string()),
+            "should not flag when names differ, got: {ids:?}"
+        );
+    }
+
+    #[test]
+    fn test_state_var_shadowing_no_inheritance() {
+        let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Foo {
+    uint256 public value;
+}
+
+contract Bar {
+    uint256 public value;
+}
+"#;
+        let ids = shadowing_ids(source);
+        assert!(
+            !ids.contains(&"state-var-shadowing".to_string()),
+            "should not flag unrelated contracts with same var name, got: {ids:?}"
+        );
+    }
+
+    #[test]
+    fn test_msg_sender_not_flagged_as_tx_origin() {
+        let source = r#"
+contract Foo {
+    function bar() public view returns (address) {
+        return msg.sender;
+    }
+}
+"#;
+        let ids = lint_ids(source);
+        assert!(
+            !ids.contains(&"tx-origin".to_string()),
+            "msg.sender should not be flagged, got: {ids:?}"
         );
     }
 

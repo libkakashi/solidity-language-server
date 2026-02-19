@@ -109,15 +109,23 @@ async fn ts_worker(
             st.resolve_file_references(&msg.file_path, &mut parser);
         }
 
-        // Dead code detection (requires symbol table to be populated).
-        let dead_code_diags = {
+        // Symbol-table-aware diagnostics (dead code, state var shadowing).
+        let extra_diags = {
             let st = symbol_table.read().await;
-            crate::lint::check_dead_code(&st, &msg.file_path, &msg.text, &line_index)
+            let mut diags =
+                crate::lint::check_dead_code(&st, &msg.file_path, &msg.text, &line_index);
+            diags.extend(crate::lint::check_state_var_shadowing(
+                &st,
+                &msg.file_path,
+                &msg.text,
+                &line_index,
+            ));
+            diags
         };
-        if !dead_code_diags.is_empty() {
+        if !extra_diags.is_empty() {
             let mut cache = ts_diag_cache.write().await;
             if let Some(cached) = cache.get_mut(&msg.uri) {
-                cached.extend(dead_code_diags);
+                cached.extend(extra_diags);
                 client
                     .publish_diagnostics(msg.uri.clone(), cached.clone(), Some(msg.version))
                     .await;
