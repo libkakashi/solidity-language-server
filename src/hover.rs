@@ -77,9 +77,10 @@ fn magic_hover(
     }
     let member = &line_text[tok_start..tok_end];
 
-    // Require a dot before the token.
+    // If no dot before the token, try type(X) hover (cursor on `type` keyword
+    // or on the type name inside the parentheses).
     if tok_start == 0 || bytes[tok_start - 1] != b'.' {
-        return None;
+        return type_expr_hover(line_text, tok_start, tok_end, member);
     }
     let dot_pos = tok_start - 1;
 
@@ -102,6 +103,84 @@ fn magic_hover(
     }
 
     None
+}
+
+/// Hover when the cursor is on the `type` keyword or the type name inside `type(X)`.
+fn type_expr_hover(line: &str, tok_start: usize, tok_end: usize, token: &str) -> Option<Hover> {
+    let bytes = line.as_bytes();
+
+    if token == "type" {
+        // Cursor on `type` keyword — look for `(X)` after it.
+        let mut pos = tok_end;
+        // Skip optional whitespace.
+        while pos < bytes.len() && bytes[pos] == b' ' {
+            pos += 1;
+        }
+        if pos >= bytes.len() || bytes[pos] != b'(' {
+            return None;
+        }
+        pos += 1;
+        let name_start = pos;
+        // Find matching ')'.
+        let mut depth: u32 = 1;
+        while pos < bytes.len() && depth > 0 {
+            match bytes[pos] {
+                b'(' => depth += 1,
+                b')' => depth -= 1,
+                _ => {}
+            }
+            pos += 1;
+        }
+        if depth != 0 {
+            return None;
+        }
+        let type_name = line[name_start..pos - 1].trim();
+        if type_name.is_empty() {
+            return None;
+        }
+        return Some(make_hover(
+            &format!("type({type_name})"),
+            Some(&format!("Returns meta type information for `{type_name}`.\n\nMembers provide compile-time constants such as `.min`, `.max`, `.interfaceId`, `.name`, `.creationCode`, and `.runtimeCode`.")),
+        ));
+    }
+
+    // Cursor on a type name inside `type(X)` — look backwards for `type(`.
+    // Check if '(' precedes the token (possibly with whitespace).
+    let mut pos = tok_start;
+    while pos > 0 && bytes[pos - 1] == b' ' {
+        pos -= 1;
+    }
+    if pos == 0 || bytes[pos - 1] != b'(' {
+        return None;
+    }
+    let paren_pos = pos - 1;
+    // Check that "type" precedes the '('.
+    if paren_pos < 4 {
+        return None;
+    }
+    if &line[paren_pos - 4..paren_pos] != "type" {
+        return None;
+    }
+    // Make sure "type" isn't part of a larger identifier.
+    if paren_pos > 4 {
+        let prev = bytes[paren_pos - 5];
+        if prev.is_ascii_alphanumeric() || prev == b'_' {
+            return None;
+        }
+    }
+    // Verify closing ')' after the type name.
+    let mut end = tok_end;
+    while end < bytes.len() && bytes[end] == b' ' {
+        end += 1;
+    }
+    if end >= bytes.len() || bytes[end] != b')' {
+        return None;
+    }
+
+    Some(make_hover(
+        &format!("type({token})"),
+        Some(&format!("Returns meta type information for `{token}`.\n\nMembers provide compile-time constants such as `.min`, `.max`, `.interfaceId`, `.name`, `.creationCode`, and `.runtimeCode`.")),
+    ))
 }
 
 fn make_hover(sig: &str, doc: Option<&str>) -> Hover {

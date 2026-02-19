@@ -2210,6 +2210,68 @@ contract Foo {
 }
 
 // ---------------------------------------------------------------------------
+// Hover on `type` keyword and type name inside `type(X)`
+// ---------------------------------------------------------------------------
+
+#[test]
+fn hover_on_type_keyword_in_type_expr() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Foo {
+    function test() public pure returns (int256) {
+        return type(int256).max;
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    // Hover on the `type` keyword.
+    let pos = source.find("type(int256).max").unwrap();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col));
+    assert!(text.is_some(), "Should show hover on `type` keyword in type(int256)");
+    let text = text.unwrap();
+    assert!(
+        text.contains("type(int256)"),
+        "Should mention type(int256), got: {text}"
+    );
+    assert!(
+        text.contains("meta type"),
+        "Should describe meta type, got: {text}"
+    );
+}
+
+#[test]
+fn hover_on_type_name_inside_type_expr() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+contract Foo {
+    function test() public pure returns (int256) {
+        return type(int256).max;
+    }
+}
+"#;
+    let (st, path) = setup(source);
+
+    // Hover on `int256` inside type(int256).
+    let pos = source.find("type(int256).max").unwrap() + "type(".len();
+    let line = source[..pos].matches('\n').count() as u32;
+    let col = (pos - source[..pos].rfind('\n').unwrap() - 1) as u32;
+
+    let text = hover_text(source, &st, &path, Position::new(line, col));
+    assert!(text.is_some(), "Should show hover on `int256` inside type(int256)");
+    let text = text.unwrap();
+    assert!(
+        text.contains("type(int256)"),
+        "Should mention type(int256), got: {text}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Magic expression hover tests: abi.*
 // ---------------------------------------------------------------------------
 
