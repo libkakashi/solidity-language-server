@@ -12,6 +12,75 @@ use crate::symbol_table::{
 };
 use crate::utils::LineIndex;
 
+// ---------------------------------------------------------------------------
+// EVM version detection from pragma
+// ---------------------------------------------------------------------------
+
+/// EVM hardfork versions relevant to opcode/builtin availability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum EvmVersion {
+    /// Pre-Paris (< 0.8.18)
+    London,
+    /// Paris / The Merge (>= 0.8.18): prevrandao replaces difficulty
+    Paris,
+    /// Shanghai (>= 0.8.20): PUSH0
+    Shanghai,
+    /// Cancun (>= 0.8.24): blobhash, blobbasefee, mcopy, tload, tstore
+    Cancun,
+}
+
+/// Extract the minimum Solidity version from a `pragma solidity ...;` line in source,
+/// then map it to the corresponding EVM version.
+pub fn detect_evm_version(source: &str) -> EvmVersion {
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("pragma") {
+            let rest = rest.trim();
+            if let Some(rest) = rest.strip_prefix("solidity") {
+                let ver = rest.trim().trim_end_matches(';').trim();
+                // Strip leading constraint characters: ^, >=, >, =
+                let ver_num = ver
+                    .trim_start_matches('^')
+                    .trim_start_matches(">=")
+                    .trim_start_matches('>')
+                    .trim_start_matches("<=")
+                    .trim_start_matches('<')
+                    .trim_start_matches('=')
+                    .trim();
+                return solidity_version_to_evm(ver_num);
+            }
+        }
+    }
+    // Default to latest if no pragma found
+    EvmVersion::Cancun
+}
+
+/// Map a Solidity version string (e.g. "0.8.24") to an EVM version.
+fn solidity_version_to_evm(version: &str) -> EvmVersion {
+    let parts: Vec<u32> = version.split('.').filter_map(|p| p.parse().ok()).collect();
+    let (major, minor, patch) = match parts.as_slice() {
+        [a, b, c, ..] => (*a, *b, *c),
+        [a, b] => (*a, *b, 0),
+        _ => return EvmVersion::Cancun, // default to latest
+    };
+    if major == 0 && minor == 8 {
+        if patch >= 24 {
+            EvmVersion::Cancun
+        } else if patch >= 20 {
+            EvmVersion::Shanghai
+        } else if patch >= 18 {
+            EvmVersion::Paris
+        } else {
+            EvmVersion::London
+        }
+    } else if major == 0 && minor < 8 {
+        EvmVersion::London
+    } else {
+        // 0.9+ or 1.0+ — assume latest
+        EvmVersion::Cancun
+    }
+}
+
 /// Handle a completion request.
 pub fn handle_completion(
     st: &SymbolTable,
@@ -96,13 +165,16 @@ pub fn handle_completion(
         }
     }
 
+    // Detect EVM version from pragma for version-aware completions.
+    let evm_version = detect_evm_version(source);
+
     // Check for assembly/Yul context.
     if trigger_char != Some(".") {
         if let Some(t) = tree {
             if is_in_assembly(t, abs_byte) {
                 return Some(CompletionResponse::List(CompletionList {
                     is_incomplete: false,
-                    items: yul_completions(),
+                    items: yul_completions_for(evm_version),
                 }));
             }
         }
@@ -111,7 +183,7 @@ pub fn handle_completion(
     let items = if trigger_char == Some(".") {
         get_dot_completions(st, file, source, line, col_byte, abs_byte)
     } else {
-        get_general_completions(st, file, abs_byte)
+        get_general_completions(st, file, abs_byte, evm_version)
     };
 
     Some(CompletionResponse::List(CompletionList {
@@ -426,142 +498,212 @@ fn is_in_assembly(tree: &tree_sitter::Tree, byte_offset: usize) -> bool {
     false
 }
 
-/// Return cached Yul/assembly completions.
-fn yul_completions() -> Vec<CompletionItem> {
-    static CACHE: OnceLock<Vec<CompletionItem>> = OnceLock::new();
-    CACHE.get_or_init(build_yul_completions).clone()
-}
-
-fn build_yul_completions() -> Vec<CompletionItem> {
-    // (name, description)
-    let builtins: &[(&str, &str)] = &[
+/// Return Yul/assembly completions filtered by EVM version.
+fn yul_completions_for(evm: EvmVersion) -> Vec<CompletionItem> {
+    // (name, description, minimum EVM version)
+    // None = available on all versions
+    let builtins: &[(&str, &str, Option<EvmVersion>)] = &[
         // Arithmetic
-        ("add(x, y)", "x + y"),
-        ("sub(x, y)", "x - y"),
-        ("mul(x, y)", "x * y"),
-        ("div(x, y)", "x / y (unsigned)"),
-        ("sdiv(x, y)", "x / y (signed)"),
-        ("mod(x, y)", "x % y (unsigned)"),
-        ("smod(x, y)", "x % y (signed)"),
-        ("exp(x, y)", "x ** y"),
-        ("not(x)", "bitwise NOT"),
-        ("lt(x, y)", "x < y"),
-        ("gt(x, y)", "x > y"),
-        ("slt(x, y)", "x < y (signed)"),
-        ("sgt(x, y)", "x > y (signed)"),
-        ("eq(x, y)", "x == y"),
-        ("iszero(x)", "x == 0"),
-        ("and(x, y)", "bitwise AND"),
-        ("or(x, y)", "bitwise OR"),
-        ("xor(x, y)", "bitwise XOR"),
-        ("byte(n, x)", "nth byte of x"),
-        ("shl(shift, val)", "val << shift"),
-        ("shr(shift, val)", "val >> shift (logical)"),
-        ("sar(shift, val)", "val >> shift (arithmetic)"),
-        ("addmod(x, y, m)", "(x + y) % m"),
-        ("mulmod(x, y, m)", "(x * y) % m"),
-        ("signextend(b, x)", "sign extend x from bit b"),
+        ("add(x, y)", "x + y", None),
+        ("sub(x, y)", "x - y", None),
+        ("mul(x, y)", "x * y", None),
+        ("div(x, y)", "x / y (unsigned)", None),
+        ("sdiv(x, y)", "x / y (signed)", None),
+        ("mod(x, y)", "x % y (unsigned)", None),
+        ("smod(x, y)", "x % y (signed)", None),
+        ("exp(x, y)", "x ** y", None),
+        ("not(x)", "bitwise NOT", None),
+        ("lt(x, y)", "x < y", None),
+        ("gt(x, y)", "x > y", None),
+        ("slt(x, y)", "x < y (signed)", None),
+        ("sgt(x, y)", "x > y (signed)", None),
+        ("eq(x, y)", "x == y", None),
+        ("iszero(x)", "x == 0", None),
+        ("and(x, y)", "bitwise AND", None),
+        ("or(x, y)", "bitwise OR", None),
+        ("xor(x, y)", "bitwise XOR", None),
+        ("byte(n, x)", "nth byte of x", None),
+        ("shl(shift, val)", "val << shift", None),
+        ("shr(shift, val)", "val >> shift (logical)", None),
+        ("sar(shift, val)", "val >> shift (arithmetic)", None),
+        ("addmod(x, y, m)", "(x + y) % m", None),
+        ("mulmod(x, y, m)", "(x * y) % m", None),
+        ("signextend(b, x)", "sign extend x from bit b", None),
         // Hashing
         (
             "keccak256(offset, size)",
             "keccak256(mem[offset..offset+size])",
+            None,
         ),
         // Environment
-        ("address()", "current contract address"),
-        ("balance(addr)", "balance of addr in wei"),
-        ("selfbalance()", "balance of current contract"),
-        ("caller()", "msg.sender"),
-        ("callvalue()", "msg.value"),
-        ("calldataload(offset)", "load 32 bytes from calldata"),
-        ("calldatasize()", "size of calldata"),
-        ("calldatacopy(dst, src, len)", "copy calldata to memory"),
-        ("codesize()", "size of current contract code"),
-        ("codecopy(dst, src, len)", "copy code to memory"),
-        ("extcodesize(addr)", "size of code at addr"),
+        ("address()", "current contract address", None),
+        ("balance(addr)", "balance of addr in wei", None),
+        ("selfbalance()", "balance of current contract", None),
+        ("caller()", "msg.sender", None),
+        ("callvalue()", "msg.value", None),
+        ("calldataload(offset)", "load 32 bytes from calldata", None),
+        ("calldatasize()", "size of calldata", None),
+        (
+            "calldatacopy(dst, src, len)",
+            "copy calldata to memory",
+            None,
+        ),
+        ("codesize()", "size of current contract code", None),
+        ("codecopy(dst, src, len)", "copy code to memory", None),
+        ("extcodesize(addr)", "size of code at addr", None),
         (
             "extcodecopy(addr, dst, src, len)",
             "copy code at addr to memory",
+            None,
         ),
-        ("returndatasize()", "size of last return data"),
+        ("returndatasize()", "size of last return data", None),
         (
             "returndatacopy(dst, src, len)",
             "copy return data to memory",
+            None,
         ),
-        ("extcodehash(addr)", "code hash of addr"),
+        ("extcodehash(addr)", "code hash of addr", None),
         // Block info
-        ("blockhash(blockNum)", "hash of block blockNum"),
-        ("coinbase()", "current block miner"),
-        ("timestamp()", "current block timestamp"),
-        ("number()", "current block number"),
-        ("difficulty()", "current block difficulty"),
-        ("prevrandao()", "previous block RANDAO value"),
-        ("gaslimit()", "block gas limit"),
-        ("chainid()", "chain ID"),
-        ("basefee()", "current base fee"),
-        ("blobbasefee()", "blob base fee"),
-        ("blobhash(idx)", "blob versioned hash at index"),
-        ("origin()", "tx.origin"),
-        ("gasprice()", "tx.gasprice"),
-        ("gas()", "remaining gas"),
+        ("blockhash(blockNum)", "hash of block blockNum", None),
+        ("coinbase()", "current block miner", None),
+        ("timestamp()", "current block timestamp", None),
+        ("number()", "current block number", None),
+        (
+            "difficulty()",
+            "current block difficulty (pre-Paris)",
+            Some(EvmVersion::London),
+        ),
+        (
+            "prevrandao()",
+            "previous block RANDAO value (Paris+)",
+            Some(EvmVersion::Paris),
+        ),
+        ("gaslimit()", "block gas limit", None),
+        ("chainid()", "chain ID", None),
+        ("basefee()", "current base fee", None),
+        (
+            "blobbasefee()",
+            "blob base fee (Cancun+)",
+            Some(EvmVersion::Cancun),
+        ),
+        (
+            "blobhash(idx)",
+            "blob versioned hash at index (Cancun+)",
+            Some(EvmVersion::Cancun),
+        ),
+        ("origin()", "tx.origin", None),
+        ("gasprice()", "tx.gasprice", None),
+        ("gas()", "remaining gas", None),
         // Memory
-        ("mload(offset)", "load 32 bytes from memory"),
-        ("mstore(offset, val)", "store 32 bytes to memory"),
-        ("mstore8(offset, val)", "store 1 byte to memory"),
-        ("msize()", "size of memory"),
-        ("mcopy(dst, src, len)", "copy memory"),
+        ("mload(offset)", "load 32 bytes from memory", None),
+        ("mstore(offset, val)", "store 32 bytes to memory", None),
+        ("mstore8(offset, val)", "store 1 byte to memory", None),
+        ("msize()", "size of memory", None),
+        (
+            "mcopy(dst, src, len)",
+            "copy memory (Cancun+)",
+            Some(EvmVersion::Cancun),
+        ),
         // Storage
-        ("sload(key)", "load from storage"),
-        ("sstore(key, val)", "store to storage"),
-        ("tload(key)", "load from transient storage"),
-        ("tstore(key, val)", "store to transient storage"),
+        ("sload(key)", "load from storage", None),
+        ("sstore(key, val)", "store to storage", None),
+        (
+            "tload(key)",
+            "load from transient storage (Cancun+)",
+            Some(EvmVersion::Cancun),
+        ),
+        (
+            "tstore(key, val)",
+            "store to transient storage (Cancun+)",
+            Some(EvmVersion::Cancun),
+        ),
         // Control flow
-        ("stop()", "halt execution"),
-        ("return(offset, size)", "return mem[offset..offset+size]"),
+        ("stop()", "halt execution", None),
+        (
+            "return(offset, size)",
+            "return mem[offset..offset+size]",
+            None,
+        ),
         (
             "revert(offset, size)",
             "revert with mem[offset..offset+size]",
+            None,
         ),
-        ("invalid()", "invalid instruction (consume all gas)"),
-        ("selfdestruct(addr)", "destroy contract, send funds to addr"),
+        ("invalid()", "invalid instruction (consume all gas)", None),
+        (
+            "selfdestruct(addr)",
+            "destroy contract, send funds to addr",
+            None,
+        ),
         // Calls
         (
             "call(g, addr, val, in, insize, out, outsize)",
             "call contract",
+            None,
         ),
         (
             "callcode(g, addr, val, in, insize, out, outsize)",
             "callcode",
+            None,
         ),
         (
             "delegatecall(g, addr, in, insize, out, outsize)",
             "delegatecall",
+            None,
         ),
         (
             "staticcall(g, addr, in, insize, out, outsize)",
             "staticcall",
+            None,
         ),
-        ("create(val, offset, size)", "create contract"),
-        ("create2(val, offset, size, salt)", "create2 contract"),
+        ("create(val, offset, size)", "create contract", None),
+        ("create2(val, offset, size, salt)", "create2 contract", None),
         // Logging
-        ("log0(offset, size)", "emit log with 0 topics"),
-        ("log1(offset, size, t1)", "emit log with 1 topic"),
-        ("log2(offset, size, t1, t2)", "emit log with 2 topics"),
-        ("log3(offset, size, t1, t2, t3)", "emit log with 3 topics"),
+        ("log0(offset, size)", "emit log with 0 topics", None),
+        ("log1(offset, size, t1)", "emit log with 1 topic", None),
+        ("log2(offset, size, t1, t2)", "emit log with 2 topics", None),
+        (
+            "log3(offset, size, t1, t2, t3)",
+            "emit log with 3 topics",
+            None,
+        ),
         (
             "log4(offset, size, t1, t2, t3, t4)",
             "emit log with 4 topics",
+            None,
         ),
         // Data
-        ("datasize(name)", "size of named object"),
-        ("dataoffset(name)", "offset of named object"),
-        ("datacopy(dst, src, len)", "copy object data to memory"),
-        ("setimmutable(offset, name, val)", "set immutable variable"),
-        ("loadimmutable(name)", "load immutable variable"),
+        ("datasize(name)", "size of named object", None),
+        ("dataoffset(name)", "offset of named object", None),
+        (
+            "datacopy(dst, src, len)",
+            "copy object data to memory",
+            None,
+        ),
+        (
+            "setimmutable(offset, name, val)",
+            "set immutable variable",
+            None,
+        ),
+        ("loadimmutable(name)", "load immutable variable", None),
     ];
 
     let mut items: Vec<CompletionItem> = builtins
         .iter()
-        .map(|&(label, detail)| CompletionItem {
+        .filter(|&&(label, _, min_ver)| {
+            match min_ver {
+                None => true,
+                Some(min) => {
+                    // Special case: difficulty is available pre-Paris only
+                    if label.starts_with("difficulty(") {
+                        evm < EvmVersion::Paris
+                    } else {
+                        evm >= min
+                    }
+                }
+            }
+        })
+        .map(|&(label, detail, _)| CompletionItem {
             label: label.to_string(),
             kind: Some(CompletionItemKind::FUNCTION),
             detail: Some(detail.to_string()),
@@ -1622,6 +1764,7 @@ fn get_general_completions(
     st: &SymbolTable,
     file: &Path,
     byte_offset: usize,
+    evm: EvmVersion,
 ) -> Vec<CompletionItem> {
     let scope_id = st.scope_at(file, byte_offset).unwrap_or(0);
     let visible = st.visible_declarations(file, scope_id);
@@ -1637,8 +1780,19 @@ fn get_general_completions(
         })
         .collect();
 
-    // Use cached static completions. (Fix #17)
-    items.extend_from_slice(static_completions());
+    // Use cached static completions, filtering version-gated globals.
+    items.extend(
+        static_completions()
+            .iter()
+            .filter(|item| {
+                // Filter out blobhash() on pre-Cancun
+                if item.label == "blobhash(uint256 index)" && evm < EvmVersion::Cancun {
+                    return false;
+                }
+                true
+            })
+            .cloned(),
+    );
     items
 }
 

@@ -2157,3 +2157,188 @@ contract Vault {
         "Should NOT show IERC20 members after balanceOf() which returns uint256, got: {labels:?}"
     );
 }
+
+// ===========================================================================
+// EVM version-aware completions
+// ===========================================================================
+
+#[test]
+fn evm_cancun_assembly_has_blobhash_and_mcopy() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+contract Foo {
+    function bar() public view returns (uint256 result) {
+        assembly {
+            result := add(1, 2)
+
+        }
+    }
+}
+"#;
+    let (st, path) = setup(source);
+    let target = source.find("add(1, 2)").unwrap() + "add(1, 2)".len();
+    let next_line_start = source[target..].find('\n').unwrap() + target + 1;
+    let line = source[..next_line_start].matches('\n').count() as u32;
+    let labels = completion_labels_with_tree(&st, &path, source, Position::new(line, 12), None);
+
+    assert!(
+        labels.iter().any(|l| l.starts_with("blobhash(")),
+        "Cancun (0.8.24) should include blobhash, got: {labels:?}"
+    );
+    assert!(
+        labels.iter().any(|l| l.starts_with("blobbasefee(")),
+        "Cancun (0.8.24) should include blobbasefee"
+    );
+    assert!(
+        labels.iter().any(|l| l.starts_with("mcopy(")),
+        "Cancun (0.8.24) should include mcopy"
+    );
+    assert!(
+        labels.iter().any(|l| l.starts_with("tload(")),
+        "Cancun (0.8.24) should include tload"
+    );
+    assert!(
+        labels.iter().any(|l| l.starts_with("tstore(")),
+        "Cancun (0.8.24) should include tstore"
+    );
+    assert!(
+        labels.iter().any(|l| l.starts_with("prevrandao(")),
+        "Cancun (0.8.24) should include prevrandao"
+    );
+    // difficulty should NOT be present on Cancun (Paris+)
+    assert!(
+        !labels.iter().any(|l| l.starts_with("difficulty(")),
+        "Cancun (0.8.24) should NOT include difficulty"
+    );
+}
+
+#[test]
+fn evm_pre_paris_assembly_has_difficulty_no_prevrandao() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.17;
+
+contract Foo {
+    function bar() public view returns (uint256 result) {
+        assembly {
+            result := add(1, 2)
+
+        }
+    }
+}
+"#;
+    let (st, path) = setup(source);
+    let target = source.find("add(1, 2)").unwrap() + "add(1, 2)".len();
+    let next_line_start = source[target..].find('\n').unwrap() + target + 1;
+    let line = source[..next_line_start].matches('\n').count() as u32;
+    let labels = completion_labels_with_tree(&st, &path, source, Position::new(line, 12), None);
+
+    // Pre-Paris (< 0.8.18) should have difficulty, not prevrandao
+    assert!(
+        labels.iter().any(|l| l.starts_with("difficulty(")),
+        "Pre-Paris (0.8.17) should include difficulty, got: {labels:?}"
+    );
+    assert!(
+        !labels.iter().any(|l| l.starts_with("prevrandao(")),
+        "Pre-Paris (0.8.17) should NOT include prevrandao"
+    );
+    // Should NOT have Cancun opcodes
+    assert!(
+        !labels.iter().any(|l| l.starts_with("blobhash(")),
+        "Pre-Paris (0.8.17) should NOT include blobhash"
+    );
+    assert!(
+        !labels.iter().any(|l| l.starts_with("mcopy(")),
+        "Pre-Paris (0.8.17) should NOT include mcopy"
+    );
+    assert!(
+        !labels.iter().any(|l| l.starts_with("tload(")),
+        "Pre-Paris (0.8.17) should NOT include tload"
+    );
+}
+
+#[test]
+fn evm_shanghai_assembly_has_prevrandao_no_cancun() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+contract Foo {
+    function bar() public view returns (uint256 result) {
+        assembly {
+            result := add(1, 2)
+
+        }
+    }
+}
+"#;
+    let (st, path) = setup(source);
+    let target = source.find("add(1, 2)").unwrap() + "add(1, 2)".len();
+    let next_line_start = source[target..].find('\n').unwrap() + target + 1;
+    let line = source[..next_line_start].matches('\n').count() as u32;
+    let labels = completion_labels_with_tree(&st, &path, source, Position::new(line, 12), None);
+
+    // Shanghai (>= 0.8.20) is post-Paris, so prevrandao yes, difficulty no
+    assert!(
+        labels.iter().any(|l| l.starts_with("prevrandao(")),
+        "Shanghai (0.8.20) should include prevrandao, got: {labels:?}"
+    );
+    assert!(
+        !labels.iter().any(|l| l.starts_with("difficulty(")),
+        "Shanghai (0.8.20) should NOT include difficulty"
+    );
+    // Shanghai is pre-Cancun, so no blobhash/mcopy/tload/tstore
+    assert!(
+        !labels.iter().any(|l| l.starts_with("blobhash(")),
+        "Shanghai (0.8.20) should NOT include blobhash"
+    );
+    assert!(
+        !labels.iter().any(|l| l.starts_with("mcopy(")),
+        "Shanghai (0.8.20) should NOT include mcopy"
+    );
+}
+
+#[test]
+fn evm_pre_cancun_general_no_blobhash() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+contract Foo {
+    function bar() public {
+
+    }
+}
+"#;
+    let (st, path) = setup(source);
+    let labels = completion_labels_with_tree(&st, &path, source, Position::new(5, 8), None);
+
+    // blobhash should NOT appear in general completions for pre-Cancun
+    assert!(
+        !labels.iter().any(|l| l.contains("blobhash")),
+        "Pre-Cancun (0.8.20) general completions should NOT include blobhash, got blobhash in: {:?}",
+        labels
+            .iter()
+            .filter(|l| l.contains("blob"))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn evm_cancun_general_has_blobhash() {
+    let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+contract Foo {
+    function bar() public {
+
+    }
+}
+"#;
+    let (st, path) = setup(source);
+    let labels = completion_labels_with_tree(&st, &path, source, Position::new(5, 8), None);
+
+    // blobhash SHOULD appear in general completions for Cancun
+    assert!(
+        labels.iter().any(|l| l.contains("blobhash")),
+        "Cancun (0.8.24) general completions should include blobhash"
+    );
+}
