@@ -4,17 +4,15 @@ use solar::interface::source_map::FileResolver;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-/// Resolves Solidity import paths to absolute filesystem paths.
-///
-/// Uses solar's `FileResolver` for spec-compliant resolution, with project
-/// configuration parsed from `foundry.toml`, `remappings.txt`, or
-/// `forge remappings`.
+/// Discovers project configuration (remappings, include paths, base path) and
+/// feeds it to solar's `FileResolver`, which implements the full Solidity path
+/// resolution spec.
 pub struct ImportResolver {
     project_root: PathBuf,
+    abs_root: PathBuf,
     remappings: Vec<ImportRemapping>,
     include_paths: Vec<PathBuf>,
     source_map: Arc<SourceMap>,
-    /// Cache of resolved import paths: (import_path, from_dir) → result.
     resolve_cache: std::collections::HashMap<(String, PathBuf), Option<PathBuf>>,
 }
 
@@ -32,8 +30,18 @@ impl ImportResolver {
         let remappings = load_remappings(&project_root);
         let include_paths = build_include_paths(&project_root);
         let source_map = Arc::new(SourceMap::empty());
+        let abs_root = std::fs::canonicalize(&project_root).unwrap_or_else(|_| {
+            if project_root.is_absolute() {
+                project_root.clone()
+            } else {
+                std::env::current_dir()
+                    .map(|cwd| cwd.join(&project_root))
+                    .unwrap_or_else(|_| project_root.clone())
+            }
+        });
         Self {
             project_root,
+            abs_root,
             remappings,
             include_paths,
             source_map,
@@ -45,20 +53,18 @@ impl ImportResolver {
         &self.project_root
     }
 
-    /// The parsed remappings (for sharing with solar checker).
     pub fn remappings(&self) -> &[ImportRemapping] {
         &self.remappings
     }
 
-    /// The include paths (for sharing with solar checker).
     pub fn include_paths(&self) -> &[PathBuf] {
         &self.include_paths
     }
 
     /// Resolve an import path to an absolute filesystem path.
     ///
-    /// `import_path` is the raw string from `import "..."` (without quotes).
-    /// `from_file` is the absolute path of the file containing the import.
+    /// Delegates entirely to solar's `FileResolver::resolve_file` which
+    /// implements the full Solidity path resolution spec.
     pub fn resolve(&mut self, import_path: &str, from_file: &Path) -> Option<PathBuf> {
         let import_path = import_path.trim_matches(|c| c == '"' || c == '\'');
         let from_dir = from_file.parent().unwrap_or(Path::new(".")).to_path_buf();
@@ -69,13 +75,7 @@ impl ImportResolver {
         }
 
         let mut resolver = FileResolver::new(&self.source_map);
-
-        // Configure with our project settings.
-        if let Ok(abs_root) = std::fs::canonicalize(&self.project_root) {
-            resolver.set_current_dir(&abs_root);
-        } else if self.project_root.is_absolute() {
-            resolver.set_current_dir(&self.project_root);
-        }
+        resolver.set_current_dir(&self.abs_root);
         resolver.add_import_remappings(self.remappings.iter().cloned());
         resolver.add_include_paths(self.include_paths.iter().cloned());
 
@@ -90,8 +90,11 @@ impl ImportResolver {
     }
 }
 
-/// Walk up from `start` looking for a directory containing `foundry.toml`,
-/// `hardhat.config.js`, `hardhat.config.ts`, or `package.json`.
+// ---------------------------------------------------------------------------
+// Project discovery
+// ---------------------------------------------------------------------------
+
+/// Walk up from `start` looking for a project config marker.
 fn find_project_root(start: &Path) -> Option<PathBuf> {
     let mut dir = if start.is_file() {
         start.parent()?.to_path_buf()
@@ -122,10 +125,14 @@ fn find_project_root(start: &Path) -> Option<PathBuf> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Remapping discovery
+// ---------------------------------------------------------------------------
+
 /// Load remappings from available sources, in priority order:
-/// 1. `forge remappings` command (auto-detects everything including git submodules)
-/// 2. `foundry.toml` [profile.default] remappings array
-/// 3. `remappings.txt` file
+/// 1. `forge remappings` (auto-detects everything including git submodules)
+/// 2. `foundry.toml` remappings array
+/// 3. `remappings.txt`
 fn load_remappings(project_root: &Path) -> Vec<ImportRemapping> {
     if let Some(r) = try_forge_remappings(project_root) {
         if !r.is_empty() {
@@ -145,9 +152,7 @@ fn load_remappings(project_root: &Path) -> Vec<ImportRemapping> {
     Vec::new()
 }
 
-/// Run `forge remappings` to auto-detect all remappings (including git submodules).
 fn try_forge_remappings(project_root: &Path) -> Option<Vec<ImportRemapping>> {
-    // Only try if foundry.toml exists (it's a Foundry project).
     if !project_root.join("foundry.toml").exists() {
         return None;
     }
@@ -165,76 +170,127 @@ fn try_forge_remappings(project_root: &Path) -> Option<Vec<ImportRemapping>> {
     }
 
     let stdout = String::from_utf8(output.stdout).ok()?;
-    let remappings: Vec<ImportRemapping> = stdout
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .filter_map(|line| line.trim().parse::<ImportRemapping>().ok())
-        .collect();
-
-    Some(remappings)
+    Some(
+        stdout
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .filter_map(|line| line.trim().parse::<ImportRemapping>().ok())
+            .collect(),
+    )
 }
 
-/// Parse remappings from `foundry.toml` using the `toml` crate.
 fn parse_foundry_toml_remappings(project_root: &Path) -> Option<Vec<ImportRemapping>> {
-    let toml_path = project_root.join("foundry.toml");
-    let content = std::fs::read_to_string(toml_path).ok()?;
+    let content = std::fs::read_to_string(project_root.join("foundry.toml")).ok()?;
     let table: toml::Table = content.parse().ok()?;
 
-    // Check top-level `remappings` first.
-    if let Some(remappings) = extract_remappings_from_table(&table) {
-        return Some(remappings);
+    if let Some(r) = extract_remappings_from_table(&table) {
+        return Some(r);
     }
-
-    // Check `[profile.default]` section.
-    if let Some(profile) = table.get("profile").and_then(|p| p.as_table()) {
-        if let Some(default) = profile.get("default").and_then(|d| d.as_table()) {
-            if let Some(remappings) = extract_remappings_from_table(default) {
-                return Some(remappings);
-            }
+    if let Some(default) = table
+        .get("profile")
+        .and_then(|p| p.as_table())
+        .and_then(|p| p.get("default"))
+        .and_then(|d| d.as_table())
+    {
+        if let Some(r) = extract_remappings_from_table(default) {
+            return Some(r);
         }
     }
-
     None
 }
 
-/// Extract remappings array from a TOML table.
 fn extract_remappings_from_table(table: &toml::Table) -> Option<Vec<ImportRemapping>> {
-    let arr = table.get("remappings")?.as_array()?;
-    let remappings: Vec<ImportRemapping> = arr
+    let remappings: Vec<ImportRemapping> = table
+        .get("remappings")?
+        .as_array()?
         .iter()
         .filter_map(|v| v.as_str())
         .filter_map(|s| s.parse::<ImportRemapping>().ok())
         .collect();
-    if remappings.is_empty() {
-        None
-    } else {
-        Some(remappings)
-    }
+    if remappings.is_empty() { None } else { Some(remappings) }
 }
 
-/// Parse remappings from `remappings.txt` (one `[context:]prefix=target` per line).
 fn parse_remappings_txt(project_root: &Path) -> Option<Vec<ImportRemapping>> {
-    let txt_path = project_root.join("remappings.txt");
-    let content = std::fs::read_to_string(txt_path).ok()?;
-
+    let content = std::fs::read_to_string(project_root.join("remappings.txt")).ok()?;
     let remappings: Vec<ImportRemapping> = content
         .lines()
         .map(|l| l.trim())
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
         .filter_map(|line| line.parse::<ImportRemapping>().ok())
         .collect();
-
-    if remappings.is_empty() {
-        None
-    } else {
-        Some(remappings)
-    }
+    if remappings.is_empty() { None } else { Some(remappings) }
 }
 
-/// Build include paths from project root.
+// ---------------------------------------------------------------------------
+// Include path discovery
+// ---------------------------------------------------------------------------
+
+/// Build the include paths that solar needs for non-relative, non-remapped
+/// imports. Reads `libs` from `foundry.toml` when present, and walks up the
+/// directory tree to find `node_modules/` directories (Node.js-style).
 fn build_include_paths(project_root: &Path) -> Vec<PathBuf> {
-    let candidates = [project_root.join("node_modules"), project_root.join("lib")];
-    candidates.into_iter().filter(|p| p.is_dir()).collect()
+    let mut paths = Vec::new();
+
+    // Foundry: honour the `libs` config (defaults to ["lib"]).
+    for lib in parse_foundry_toml_libs(project_root) {
+        let p = project_root.join(&lib);
+        if p.is_dir() {
+            paths.push(p);
+        }
+    }
+
+    // Node.js / Hardhat: walk up collecting node_modules/ directories.
+    let mut dir = project_root.to_path_buf();
+    loop {
+        let nm = dir.join("node_modules");
+        if nm.is_dir() && !paths.contains(&nm) {
+            paths.push(nm);
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+
+    paths
+}
+
+/// Parse `libs` from `foundry.toml`. Returns Foundry's default `["lib"]` when
+/// the file exists but doesn't specify `libs`. Returns empty vec when there is
+/// no `foundry.toml` (not a Foundry project).
+fn parse_foundry_toml_libs(project_root: &Path) -> Vec<String> {
+    let content = match std::fs::read_to_string(project_root.join("foundry.toml")) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    let table: toml::Table = match content.parse() {
+        Ok(t) => t,
+        Err(_) => return vec!["lib".to_string()],
+    };
+
+    if let Some(libs) = extract_string_array(&table, "libs") {
+        return libs;
+    }
+    if let Some(libs) = table
+        .get("profile")
+        .and_then(|p| p.as_table())
+        .and_then(|p| p.get("default"))
+        .and_then(|d| d.as_table())
+        .and_then(|d| extract_string_array(d, "libs"))
+    {
+        return libs;
+    }
+
+    vec!["lib".to_string()]
+}
+
+fn extract_string_array(table: &toml::Table, key: &str) -> Option<Vec<String>> {
+    let values: Vec<String> = table
+        .get(key)?
+        .as_array()?
+        .iter()
+        .filter_map(|v| v.as_str().map(String::from))
+        .collect();
+    if values.is_empty() { None } else { Some(values) }
 }
 
 #[cfg(test)]
@@ -381,5 +437,91 @@ remappings = [
         assert_eq!(remappings[0].context, "src");
         assert_eq!(remappings[0].prefix, "@oz/");
         assert_eq!(remappings[0].path, "lib/oz/");
+    }
+
+    #[test]
+    fn test_foundry_toml_custom_libs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let toml_content = r#"
+[profile.default]
+libs = ["dependencies", "node_modules"]
+"#;
+        fs::write(tmp.path().join("foundry.toml"), toml_content).unwrap();
+        fs::create_dir_all(tmp.path().join("dependencies")).unwrap();
+        fs::create_dir_all(tmp.path().join("node_modules")).unwrap();
+
+        let libs = parse_foundry_toml_libs(tmp.path());
+        assert_eq!(libs, vec!["dependencies", "node_modules"]);
+
+        let include_paths = build_include_paths(tmp.path());
+        assert!(
+            include_paths.contains(&tmp.path().join("dependencies")),
+            "expected dependencies/ in include paths, got: {include_paths:?}"
+        );
+    }
+
+    #[test]
+    fn test_foundry_toml_default_libs() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("foundry.toml"), "[profile.default]\n").unwrap();
+        fs::create_dir_all(tmp.path().join("lib")).unwrap();
+
+        let libs = parse_foundry_toml_libs(tmp.path());
+        assert_eq!(libs, vec!["lib"]);
+
+        let include_paths = build_include_paths(tmp.path());
+        assert!(
+            include_paths.contains(&tmp.path().join("lib")),
+            "expected lib/ in include paths, got: {include_paths:?}"
+        );
+    }
+
+    #[test]
+    fn test_foundry_toml_top_level_libs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let toml_content = r#"
+libs = ["custom-deps"]
+"#;
+        fs::write(tmp.path().join("foundry.toml"), toml_content).unwrap();
+        fs::create_dir_all(tmp.path().join("custom-deps")).unwrap();
+
+        let libs = parse_foundry_toml_libs(tmp.path());
+        assert_eq!(libs, vec!["custom-deps"]);
+    }
+
+    #[test]
+    fn test_resolve_custom_libs_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let toml_content = r#"
+[profile.default]
+libs = ["dependencies"]
+"#;
+        fs::write(tmp.path().join("foundry.toml"), toml_content).unwrap();
+        fs::create_dir_all(tmp.path().join("dependencies/forge-std/src")).unwrap();
+        let target = tmp.path().join("dependencies/forge-std/src/Test.sol");
+        fs::write(&target, "").unwrap();
+        fs::create_dir_all(tmp.path().join("src")).unwrap();
+        let from_file = tmp.path().join("src/Foo.sol");
+        fs::write(&from_file, "").unwrap();
+
+        fs::write(
+            tmp.path().join("remappings.txt"),
+            "forge-std/=dependencies/forge-std/src/\n",
+        )
+        .unwrap();
+
+        let mut resolver = ImportResolver::with_root(tmp.path().to_path_buf());
+        let resolved = resolver.resolve("forge-std/Test.sol", &from_file).unwrap();
+        assert!(
+            resolved.ends_with("dependencies/forge-std/src/Test.sol"),
+            "expected path ending with dependencies/forge-std/src/Test.sol, got: {resolved:?}"
+        );
+    }
+
+    #[test]
+    fn test_no_foundry_toml_no_default_libs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let libs = parse_foundry_toml_libs(tmp.path());
+        assert!(libs.is_empty(), "expected no libs for non-Foundry project, got: {libs:?}");
     }
 }
