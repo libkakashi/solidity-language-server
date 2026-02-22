@@ -24,7 +24,7 @@ use crate::symbols;
 use crate::type_hierarchy;
 use crate::utils::{self, LineIndex};
 use rustc_hash::FxHashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tower_lsp::{Client, LanguageServer, lsp_types::*};
@@ -32,6 +32,11 @@ use tower_lsp::{Client, LanguageServer, lsp_types::*};
 thread_local! {
     /// Reusable TsParser for formatting (avoids re-allocating per request).
     static FMT_PARSER: std::cell::RefCell<TsParser> = std::cell::RefCell::new(TsParser::new());
+}
+
+/// Only process `.sol` files — ignore everything else the editor sends.
+fn is_solidity_file(path: &Path) -> bool {
+    path.extension().is_some_and(|ext| ext == "sol")
 }
 
 // ---------------------------------------------------------------------------
@@ -276,6 +281,7 @@ impl LanguageServer for SolLsp {
         if let Some(root_uri) = params.root_uri.as_ref() {
             if let Ok(root_path) = root_uri.to_file_path() {
                 let resolver = ImportResolver::new(&root_path);
+                resolver.log_config();
                 let mut st = self.symbol_table.write().await;
                 st.resolver = resolver;
                 drop(st);
@@ -286,6 +292,7 @@ impl LanguageServer for SolLsp {
             if let Some(folder) = folders.first() {
                 if let Ok(root_path) = folder.uri.to_file_path() {
                     let resolver = ImportResolver::new(&root_path);
+                    resolver.log_config();
                     let mut st = self.symbol_table.write().await;
                     st.resolver = resolver;
                     drop(st);
@@ -408,6 +415,9 @@ impl LanguageServer for SolLsp {
         let version = params.text_document.version;
 
         if let Ok(file_path) = uri.to_file_path() {
+            if !is_solidity_file(&file_path) {
+                return;
+            }
             let line_index = Arc::new(LineIndex::new(&text));
             self.text_cache
                 .write()
@@ -422,13 +432,16 @@ impl LanguageServer for SolLsp {
         let version = params.text_document.version;
 
         if let Some(change) = params.content_changes.into_iter().next() {
-            let text: Arc<str> = change.text.into();
-            let line_index = Arc::new(LineIndex::new(&text));
-            self.text_cache
-                .write()
-                .await
-                .insert(uri.clone(), (Arc::clone(&text), line_index));
             if let Ok(file_path) = uri.to_file_path() {
+                if !is_solidity_file(&file_path) {
+                    return;
+                }
+                let text: Arc<str> = change.text.into();
+                let line_index = Arc::new(LineIndex::new(&text));
+                self.text_cache
+                    .write()
+                    .await
+                    .insert(uri.clone(), (Arc::clone(&text), line_index));
                 self.notify_workers(&uri, &file_path, &text, version);
             }
         }
@@ -436,28 +449,32 @@ impl LanguageServer for SolLsp {
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
         let uri = params.text_document.uri;
+
+        let file_path = match uri.to_file_path() {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        if !is_solidity_file(&file_path) {
+            return;
+        }
+
         let text: Arc<str> = match params.text {
             Some(t) => t.into(),
             None => {
                 // Fix #3: use to_file_path() instead of uri.path()
-                match uri.to_file_path() {
-                    Ok(path) => match std::fs::read_to_string(&path) {
-                        Ok(c) => c.into(),
-                        Err(_) => return,
-                    },
+                match std::fs::read_to_string(&file_path) {
+                    Ok(c) => c.into(),
                     Err(_) => return,
                 }
             }
         };
 
-        if let Ok(file_path) = uri.to_file_path() {
-            let line_index = Arc::new(LineIndex::new(&text));
-            self.text_cache
-                .write()
-                .await
-                .insert(uri.clone(), (Arc::clone(&text), line_index));
-            self.notify_workers(&uri, &file_path, &text, 0);
-        }
+        let line_index = Arc::new(LineIndex::new(&text));
+        self.text_cache
+            .write()
+            .await
+            .insert(uri.clone(), (Arc::clone(&text), line_index));
+        self.notify_workers(&uri, &file_path, &text, 0);
     }
 
     async fn will_save(&self, _params: WillSaveTextDocumentParams) {}
