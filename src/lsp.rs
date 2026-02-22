@@ -49,22 +49,35 @@ struct SolarWorkerMsg {
     uri: Url,
     file_path: PathBuf,
     text: Arc<str>,
-    /// Monotonic counter to detect stale results. (Fix #2)
-    seq: u64,
 }
 
 // ---------------------------------------------------------------------------
 // Workers
 // ---------------------------------------------------------------------------
 
-/// Long-lived tree-sitter worker. Parses once, then lints + indexes from
-/// the same tree. (Fix #1)
+/// Merge both diagnostic caches and publish.
+async fn publish_merged(
+    client: &Client,
+    uri: &Url,
+    version: Option<i32>,
+    ts_diag_cache: &RwLock<FxHashMap<Url, Vec<Diagnostic>>>,
+    solar_diag_cache: &RwLock<FxHashMap<Url, Vec<Diagnostic>>>,
+) {
+    let ts = ts_diag_cache.read().await;
+    let solar = solar_diag_cache.read().await;
+    let mut merged: Vec<Diagnostic> = ts.get(uri).cloned().unwrap_or_default();
+    merged.extend(solar.get(uri).cloned().unwrap_or_default());
+    client.publish_diagnostics(uri.clone(), merged, version).await;
+}
+
+/// Long-lived tree-sitter worker.
 async fn ts_worker(
     mut rx: tokio::sync::mpsc::UnboundedReceiver<TsWorkerMsg>,
     client: Client,
     lint_engine: Arc<LintEngine>,
     symbol_table: Arc<RwLock<SymbolTable>>,
     ts_diag_cache: Arc<RwLock<FxHashMap<Url, Vec<Diagnostic>>>>,
+    solar_diag_cache: Arc<RwLock<FxHashMap<Url, Vec<Diagnostic>>>>,
     tree_cache: Arc<RwLock<FxHashMap<Url, tree_sitter::Tree>>>,
 ) {
     let mut parser = TsParser::new();
@@ -75,35 +88,22 @@ async fn ts_worker(
             msg = newer;
         }
 
-        // Parse once. (Fix #1)
         let tree = match parser.parse(&msg.text, None) {
             Some(t) => t,
             None => continue,
         };
 
-        // Cache parsed tree for use by completion (avoids re-parsing).
         tree_cache
             .write()
             .await
             .insert(msg.uri.clone(), tree.clone());
 
-        // Build line index once for both parse errors and lint.
         let line_index = crate::utils::LineIndex::new(&msg.text);
 
-        // Lint from the parsed tree.
         let mut diags = parser::collect_parse_errors(&tree, &msg.text, &line_index);
         diags.extend(lint_engine.run(&tree, &msg.text, &line_index));
 
-        // Cache tree-sitter diagnostics (moved, not cloned). (Fix #13)
-        {
-            let mut cache = ts_diag_cache.write().await;
-            cache.insert(msg.uri.clone(), diags.clone());
-        }
-        client
-            .publish_diagnostics(msg.uri.clone(), diags, Some(msg.version))
-            .await;
-
-        // Re-index symbol table using the same tree. (Fix #1)
+        // Re-index symbol table.
         {
             let mut st = symbol_table.write().await;
             st.index_file_with_tree(&msg.file_path, &msg.text, &tree);
@@ -111,36 +111,31 @@ async fn ts_worker(
         }
 
         // Symbol-table-aware diagnostics (dead code, state var shadowing).
-        let extra_diags = {
+        {
             let st = symbol_table.read().await;
-            let mut diags =
-                crate::lint::check_dead_code(&st, &msg.file_path, &msg.text, &line_index);
-            diags.extend(crate::lint::check_state_var_shadowing(
-                &st,
-                &msg.file_path,
-                &msg.text,
-                &line_index,
+            diags.extend(crate::lint::check_dead_code(
+                &st, &msg.file_path, &msg.text, &line_index,
             ));
-            diags
-        };
-        if !extra_diags.is_empty() {
-            let mut cache = ts_diag_cache.write().await;
-            if let Some(cached) = cache.get_mut(&msg.uri) {
-                cached.extend(extra_diags);
-                client
-                    .publish_diagnostics(msg.uri.clone(), cached.clone(), Some(msg.version))
-                    .await;
-            }
+            diags.extend(crate::lint::check_state_var_shadowing(
+                &st, &msg.file_path, &msg.text, &line_index,
+            ));
         }
+
+        // Cache ts diagnostics and publish merged (ts + solar).
+        ts_diag_cache.write().await.insert(msg.uri.clone(), diags);
+        publish_merged(
+            &client, &msg.uri, Some(msg.version),
+            &ts_diag_cache, &solar_diag_cache,
+        ).await;
     }
 }
 
-/// Long-lived solar worker with sequence-based staleness check. (Fix #2)
+/// Long-lived solar worker.
 async fn solar_worker(
     mut rx: tokio::sync::mpsc::UnboundedReceiver<SolarWorkerMsg>,
     client: Client,
     ts_diag_cache: Arc<RwLock<FxHashMap<Url, Vec<Diagnostic>>>>,
-    latest_seq: Arc<std::sync::atomic::AtomicU64>,
+    solar_diag_cache: Arc<RwLock<FxHashMap<Url, Vec<Diagnostic>>>>,
     symbol_table: Arc<RwLock<SymbolTable>>,
 ) {
     while let Some(mut msg) = rx.recv().await {
@@ -149,9 +144,6 @@ async fn solar_worker(
             msg = newer;
         }
 
-        let my_seq = msg.seq;
-
-        // Read resolver config from symbol table.
         let solar_config = {
             let st = symbol_table.read().await;
             solar_checker::SolarConfig {
@@ -161,7 +153,6 @@ async fn solar_worker(
             }
         };
 
-        // Run solar on a blocking thread using the in-memory buffer.
         let file_path = msg.file_path.clone();
         let text = msg.text.clone();
         let solar_diags = tokio::task::spawn_blocking(move || {
@@ -170,25 +161,18 @@ async fn solar_worker(
         .await
         .unwrap_or_default();
 
-        // Check if a newer ts_worker result has arrived since we started.
-        // If so, our ts_diag_cache may be stale — skip merging. (Fix #2)
-        let current_seq = latest_seq.load(std::sync::atomic::Ordering::Acquire);
-        if my_seq < current_seq {
-            // Stale — a newer version was processed by ts_worker. Skip.
+        // If a newer message arrived while we were processing, skip —
+        // the next iteration will pick up the latest version.
+        if !rx.is_empty() {
             continue;
         }
 
-        // Merge with cached tree-sitter diagnostics.
-        let ts_diags = ts_diag_cache
-            .read()
-            .await
-            .get(&msg.uri)
-            .cloned()
-            .unwrap_or_default();
-        let mut merged = ts_diags;
-        merged.extend(solar_diags);
-
-        client.publish_diagnostics(msg.uri, merged, None).await;
+        // Cache solar diagnostics and publish merged (ts + solar).
+        solar_diag_cache.write().await.insert(msg.uri.clone(), solar_diags);
+        publish_merged(
+            &client, &msg.uri, None,
+            &ts_diag_cache, &solar_diag_cache,
+        ).await;
     }
 }
 
@@ -209,8 +193,7 @@ pub struct SolLsp {
     ts_rx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<TsWorkerMsg>>>>,
     solar_rx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<SolarWorkerMsg>>>>,
     ts_diag_cache: Arc<RwLock<FxHashMap<Url, Vec<Diagnostic>>>>,
-    /// Monotonic sequence number for staleness detection. (Fix #2)
-    seq: Arc<std::sync::atomic::AtomicU64>,
+    solar_diag_cache: Arc<RwLock<FxHashMap<Url, Vec<Diagnostic>>>>,
     fmt_config: Arc<RwLock<FmtConfig>>,
 }
 
@@ -223,6 +206,7 @@ impl SolLsp {
         let tree_cache = Arc::new(RwLock::new(FxHashMap::default()));
         let lint_engine = Arc::new(LintEngine::new());
         let ts_diag_cache = Arc::new(RwLock::new(FxHashMap::default()));
+        let solar_diag_cache = Arc::new(RwLock::new(FxHashMap::default()));
 
         let (ts_tx, ts_rx) = tokio::sync::mpsc::unbounded_channel();
         let (solar_tx, solar_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -238,7 +222,7 @@ impl SolLsp {
             ts_rx: Arc::new(tokio::sync::Mutex::new(Some(ts_rx))),
             solar_rx: Arc::new(tokio::sync::Mutex::new(Some(solar_rx))),
             ts_diag_cache,
-            seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            solar_diag_cache,
             fmt_config: Arc::new(RwLock::new(FmtConfig::default())),
         }
     }
@@ -256,9 +240,8 @@ impl SolLsp {
         }
     }
 
-    /// Send a file to both workers for processing. (Fix #24: text is Arc<str>)
+    /// Send a file to both workers for processing.
     fn notify_workers(&self, uri: &Url, file_path: &PathBuf, text: &Arc<str>, version: i32) {
-        let seq = self.seq.fetch_add(1, std::sync::atomic::Ordering::Release) + 1;
         let _ = self.ts_tx.send(TsWorkerMsg {
             uri: uri.clone(),
             file_path: file_path.clone(),
@@ -269,7 +252,6 @@ impl SolLsp {
             uri: uri.clone(),
             file_path: file_path.clone(),
             text: Arc::clone(text),
-            seq,
         });
     }
 }
@@ -397,6 +379,7 @@ impl LanguageServer for SolLsp {
                 self.lint_engine.clone(),
                 self.symbol_table.clone(),
                 self.ts_diag_cache.clone(),
+                self.solar_diag_cache.clone(),
                 self.tree_cache.clone(),
             ));
         }
@@ -405,7 +388,7 @@ impl LanguageServer for SolLsp {
                 solar_rx,
                 self.client.clone(),
                 self.ts_diag_cache.clone(),
-                self.seq.clone(),
+                self.solar_diag_cache.clone(),
                 self.symbol_table.clone(),
             ));
         }
