@@ -48,6 +48,7 @@ struct TsWorkerMsg {
 struct SolarWorkerMsg {
     uri: Url,
     file_path: PathBuf,
+    text: Arc<str>,
     /// Monotonic counter to detect stale results. (Fix #2)
     seq: u64,
 }
@@ -160,10 +161,11 @@ async fn solar_worker(
             }
         };
 
-        // Run solar on a blocking thread.
+        // Run solar on a blocking thread using the in-memory buffer.
         let file_path = msg.file_path.clone();
+        let text = msg.text.clone();
         let solar_diags = tokio::task::spawn_blocking(move || {
-            solar_checker::check_file(&file_path, &solar_config)
+            solar_checker::check_file(&file_path, &text, &solar_config)
         })
         .await
         .unwrap_or_default();
@@ -266,6 +268,7 @@ impl SolLsp {
         let _ = self.solar_tx.send(SolarWorkerMsg {
             uri: uri.clone(),
             file_path: file_path.clone(),
+            text: Arc::clone(text),
             seq,
         });
     }

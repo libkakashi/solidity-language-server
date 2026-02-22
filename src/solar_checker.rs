@@ -19,14 +19,15 @@ pub struct SolarConfig {
     pub base_path: Option<PathBuf>,
 }
 
-/// Run solar type checking on a saved file, returning LSP diagnostics.
+/// Run solar type checking on in-memory source, returning LSP diagnostics.
 ///
 /// This is synchronous — designed to run inside `tokio::task::spawn_blocking`.
 /// Wrapped in `catch_unwind` so a solar panic does not crash the LSP.
-pub fn check_file(file_path: &Path, config: &SolarConfig) -> Vec<Diagnostic> {
+pub fn check_file(file_path: &Path, source: &str, config: &SolarConfig) -> Vec<Diagnostic> {
     let config = config.clone();
+    let source = source.to_string();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        check_file_inner(file_path, &config)
+        check_file_inner(file_path, &source, &config)
     }));
     match result {
         Ok(diags) => diags,
@@ -37,7 +38,7 @@ pub fn check_file(file_path: &Path, config: &SolarConfig) -> Vec<Diagnostic> {
     }
 }
 
-fn check_file_inner(file_path: &Path, config: &SolarConfig) -> Vec<Diagnostic> {
+fn check_file_inner(file_path: &Path, source: &str, config: &SolarConfig) -> Vec<Diagnostic> {
     let (emitter, diag_buffer) = InMemoryEmitter::new();
     let opts = Opts {
         import_remappings: config.remappings.clone(),
@@ -51,9 +52,19 @@ fn check_file_inner(file_path: &Path, config: &SolarConfig) -> Vec<Diagnostic> {
         .build();
     let mut compiler = Compiler::new(sess);
 
+    // Load the in-memory source into solar's source map so it checks the
+    // editor buffer rather than the (possibly stale) file on disk.
+    let file = match compiler.sess().source_map().new_source_file(
+        file_path.to_path_buf(),
+        source,
+    ) {
+        Ok(f) => f,
+        Err(_) => return vec![],
+    };
+
     let parse_ok = compiler.enter_mut(|compiler| -> solar::interface::Result<()> {
         let mut pcx = compiler.parse();
-        pcx.load_file(file_path)?;
+        pcx.add_file(file);
         pcx.parse();
         Ok(())
     });
